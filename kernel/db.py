@@ -19,7 +19,7 @@ from typing import Any
 
 import asyncpg
 
-SCHEMA_PATH = Path(__file__).resolve().parent.parent / "ops" / "sql" / "0001_init.sql"
+SCHEMA_DIR = Path(__file__).resolve().parent.parent / "ops" / "sql"
 
 _CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 _ULID_ERR = "ulid must be a 26-char crockford string"
@@ -160,10 +160,15 @@ class Database:
         await self._pool.close()
 
     async def apply_schema(self, sql: str | None = None) -> None:
-        """Apply ops/sql/0001_init.sql (idempotent by construction)."""
-        sql = sql or SCHEMA_PATH.read_text(encoding="utf-8")
+        """Apply all ops/sql/*.sql migrations in order (each idempotent)."""
+        if sql is not None:
+            async with self._pool.acquire() as conn:
+                await conn.execute(sql)
+            return
+        scripts = sorted(SCHEMA_DIR.glob("*.sql"))
         async with self._pool.acquire() as conn:
-            await conn.execute(sql)
+            for path in scripts:
+                await conn.execute(path.read_text(encoding="utf-8"))
 
     @staticmethod
     def _intent_row(r: asyncpg.Record) -> IntentRow:
