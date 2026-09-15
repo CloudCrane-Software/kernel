@@ -10,6 +10,8 @@ CREATE TABLE IF NOT EXISTS mandates (
     mandate_id     TEXT PRIMARY KEY,
     human_signer   TEXT NOT NULL,
     signature      TEXT NOT NULL,
+    -- conclusion of the external Mandate Verifier (WO-02 policy consumes it)
+    signature_verified BOOLEAN NOT NULL DEFAULT FALSE,
     payload_jcs    JSONB NOT NULL,
     mandate_sha256 CHAR(64) NOT NULL UNIQUE,
     cap_amount     BIGINT NOT NULL CHECK (cap_amount > 0),
