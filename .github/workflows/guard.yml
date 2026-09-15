@@ -1,0 +1,37 @@
+name: guard (code/eval separation)
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Structural rule (manual §6.1 guard.yml): product code and eval assets must
+# never be modified in the same change. The threshold path manifest lives in
+# the CNB eval-gate repo (manifest.yaml); until the mirror sync lands, the
+# in-repo eval assets below are the guarded set.
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fail if product code and eval assets change together
+        run: |
+          set -euo pipefail
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+          if [[ -z "$BASE" ]]; then
+            echo "push event: guard only enforced on PRs"; exit 0
+          fi
+          CHANGED=$(git diff --name-only "$BASE".."$HEAD")
+          echo "$CHANGED"
+          EVAL_PATHS='^(tests/test_smoke_eval\.py|evals/|ops/eval|thresholds/|manifest\.yaml)'
+          PRODUCT_PATHS='^(kernel|gateway|reconciler|pricing|policies|ops/sql)/'
+          EVAL_HITS=$(printf '%s\n' "$CHANGED" | grep -E "$EVAL_PATHS" || true)
+          PRODUCT_HITS=$(printf '%s\n' "$CHANGED" | grep -E "$PRODUCT_PATHS" || true)
+          if [[ -n "$EVAL_HITS" && -n "$PRODUCT_HITS" ]]; then
+            echo "::error::product code and eval assets changed in the same PR (split them)"
+            exit 1
+          fi
+          echo "guard ok: no mixed code+eval changes"
