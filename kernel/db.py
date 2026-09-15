@@ -190,13 +190,14 @@ class Database:
         cap_amount: int,
         ledger_id: str,
         expires_at: str,
+        signature_verified: bool = False,
     ) -> MandateRow:
         payload_jcs = canonical_json(payload)
         q = """
             INSERT INTO mandates
-                (mandate_id, human_signer, signature, payload_jcs, mandate_sha256,
-                 cap_amount, ledger_id, expires_at)
-            VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8::timestamptz)
+                (mandate_id, human_signer, signature, signature_verified, payload_jcs,
+                 mandate_sha256, cap_amount, ledger_id, expires_at)
+            VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9::timestamptz)
             ON CONFLICT (mandate_id) DO NOTHING
             RETURNING mandate_id, human_signer, signature, payload_jcs::text,
                       mandate_sha256, cap_amount, ledger_id, expires_at::text, status
@@ -208,6 +209,7 @@ class Database:
                     mandate_id,
                     human_signer,
                     signature,
+                    signature_verified,
                     payload_jcs,
                     sha256_hex(payload_jcs),
                     cap_amount,
