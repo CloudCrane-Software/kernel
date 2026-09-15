@@ -51,10 +51,14 @@ class GatewayService:
         db: Database,
         policy: PolicyClient,
         classifiers: ClassifierRegistry | None = None,
+        ledger: Any | None = None,
     ) -> None:
         self.db = db
         self.policy = policy
         self.classifiers = classifiers or ClassifierRegistry()
+        # optional budget ledger (WO-05): when present, reservations carry a
+        # real engine transfer id instead of the ULID placeholder
+        self.ledger = ledger
         # external-state probe adapters, registered by the reconciler (WO-06)
         self.probe_adapters: dict[str, Any] = {}
 
@@ -128,7 +132,7 @@ class GatewayService:
 
         mandate = await conn.fetchrow(
             """SELECT mandate_id, payload_jcs::text, mandate_sha256, signature_verified,
-                      status, expires_at::text, human_signer
+                      status, expires_at::text, human_signer, cap_amount
                FROM mandates WHERE mandate_id = $1""",
             grant["mandate_id"],
         )
@@ -303,9 +307,16 @@ class GatewayService:
             )
             return GatewayError(ErrorCode.BUDGET_EXHAUSTED, "grant budget window exhausted")
 
-        # 6. reservation row (ULID placeholder until WO-05)
+        # 6. reservation row: engine transfer id when the ledger is wired,
+        # ULID placeholder before TigerBeetle lands (WO-05 staged adoption)
         reservation_id = f"res-{new_ulid()}"
-        tb_transfer_id = new_ulid()
+        if self.ledger is not None:
+            await self.ledger.ensure_budget_account(grant["mandate_id"], mandate["cap_amount"])
+            tb_transfer_id = await self.ledger.create_pending_transfer(
+                grant["mandate_id"], req.amount, req.idempotency_key
+            )
+        else:
+            tb_transfer_id = new_ulid()
         await conn.execute(
             """INSERT INTO reservations
                    (reservation_id, intent_id, mandate_id, tb_transfer_id, amount)
@@ -395,6 +406,16 @@ class GatewayService:
                 raise GatewayError(ErrorCode.VALIDATION_ERROR, str(e)) from e
 
     async def _settle(self, conn: Any, intent_id: str, state: str) -> None:
+        # settle the engine transfer alongside the DB reservation (WO-05)
+        if self.ledger is not None:
+            tb_id = await conn.fetchval(
+                "SELECT tb_transfer_id FROM reservations WHERE intent_id = $1", intent_id
+            )
+            if tb_id:
+                if state == "APPLIED":
+                    await self.ledger.post_transfer(tb_id)
+                else:
+                    await self.ledger.void_transfer(tb_id)
         if (
             await conn.fetchval("SELECT state FROM action_intents WHERE intent_id = $1", intent_id)
             == "PREPARED"

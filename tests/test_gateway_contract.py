@@ -15,6 +15,7 @@ import pytest
 import pytest_asyncio
 
 from gateway.app import build_app
+from gateway.schemas import ReceiptRequest, RegisterIntentRequest
 from kernel.db import Database
 from kernel.policy import PolicyClient
 
@@ -365,3 +366,30 @@ async def test_openapi_contains_the_four_operations(db: Database, opa_url: str) 
         "/v1/episodes/{episode_id}/close",
     ):
         assert p in paths
+
+
+# ------------------------------------------------------- WO-05 ledger wiring
+async def test_gateway_with_ledger_posts_real_transfer(db: Database, opa_url: str) -> None:
+    from gateway.classifiers import default_registry
+    from gateway.service import GatewayService
+    from kernel.ledger import InMemoryLedger
+    from kernel.policy import PolicyClient as PC
+
+    ledger = InMemoryLedger()
+    # rebuild with ledger injected (service param)
+
+    svc = GatewayService(db, PC(opa_url), default_registry(), ledger=ledger)
+
+    mandate_id, grant_id, ep = await _seed(db)
+    await ledger.ensure_budget_account(mandate_id, cap=1000)
+    req = RegisterIntentRequest(**_intent_req(grant_id, ep))  # type: ignore[arg-type]
+    resp = await svc.register_intent(req)
+    assert resp.created is True
+    # tb_transfer_id is now the ledger transfer id (= idempotency key)
+    assert resp.tb_transfer_id == req.idempotency_key
+    bal = await ledger.balance(mandate_id)
+    assert bal.pending == req.amount  # budget occupied at engine level
+
+    await svc.verify_receipt(resp.intent_id, ReceiptRequest(receipt={"status": "applied"}))
+    bal = await ledger.balance(mandate_id)
+    assert (bal.posted, bal.pending) == (req.amount, 0)  # posted on success
