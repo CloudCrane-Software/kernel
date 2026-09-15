@@ -8,6 +8,7 @@ license = { text = "Apache-2.0" }
 dependencies = [
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
+    "asyncpg>=0.30",
 ]
 
 [dependency-groups]
@@ -17,6 +18,7 @@ dev = [
     "mypy>=1.13",
     "ruff>=0.8",
     "pre-commit>=4.0",
+    "testcontainers[postgres]>=4.8",
 ]
 
 [build-system]
@@ -43,8 +45,13 @@ strict = true
 warn_unreachable = true
 show_error_codes = true
 
+[[tool.mypy.overrides]]
+module = ["asyncpg.*", "testcontainers.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 markers = [
     "smoke: smoke eval subset (used by eval-gate workflow)",
