@@ -10,6 +10,8 @@ budgeted, lease-fenced and evidenced.
 kernel/        data access layer (asyncpg) + decision ledger domain
 gateway/       action gateway — FastAPI, the only door to external effects
 reconciler/    three-state reconciler for UNKNOWN intents
+kernel/executor/  episode state machine (RESERVED->RUNNING->VERIFYING->CLOSED) + Restate adapter
+kernel/runner/    bounded task runners (local subprocess / JiuwenBox sandbox)
 pricing/       cost engine placeholder (M3)
 policies/      OPA Rego policies + tests (opa test policies/)
 ops/sql/       explicit DDL migrations (applied in order, idempotent)
