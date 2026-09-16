@@ -145,7 +145,7 @@ async def test_hello_py_work_order_full_loop(
     stack: tuple[GatewayService, EpisodeExecutor, list[dict[str, Any]]],
     tmp_path: Path,
 ) -> None:
-    gateway, executor, events = stack
+    _gateway, executor, events = stack
     grant_id = await _seed(db)
     episode_id = f"ep-hello-{uuid.uuid4().hex[:8]}"
 
@@ -206,7 +206,7 @@ async def test_crash_recovery_preserves_state_and_fence(
     stack: tuple[GatewayService, EpisodeExecutor, list[dict[str, Any]]],
     tmp_path: Path,
 ) -> None:
-    gateway, executor, events = stack
+    _gateway, executor, events = stack
     grant_id = await _seed(db)
     episode_id = f"ep-crash-{uuid.uuid4().hex[:8]}"
     await executor.start_episode(episode_id)
@@ -247,7 +247,7 @@ async def test_recover_detects_fence_violation(
     stack: tuple[GatewayService, EpisodeExecutor, list[dict[str, Any]]],
     tmp_path: Path,
 ) -> None:
-    gateway, executor, _ = stack
+    _gateway, executor, _ = stack
     grant_id = await _seed(db)
     episode_id = f"ep-fence-{uuid.uuid4().hex[:8]}"
     await executor.start_episode(episode_id)
