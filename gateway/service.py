@@ -181,11 +181,11 @@ class GatewayService:
         if decision.outcome != "ALLOW":
             # audit the rejection: the intent is registered PREPARED (never
             # dispatched) so the append-only decision row has a referent
-            await conn.execute(
+            inserted = await conn.execute(
                 """INSERT INTO action_intents
                        (intent_id, episode_id, grant_id, idempotency_key, params_hash,
-                        fence_epoch, action_type)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7)
+                        fence_epoch, action_type, params)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
                    ON CONFLICT (idempotency_key) DO NOTHING""",
                 req.operation_id,
                 req.episode_id,
@@ -194,7 +194,13 @@ class GatewayService:
                 params_hash,
                 epoch,
                 req.action_type,
+                canonical_json(req.params),
             )
+            if not inserted.endswith(" 1"):
+                # same key replayed under a different operation_id
+                raise IdempotencyKeyConflict(
+                    f"idempotency key {req.idempotency_key!r} already registered"
+                )
             await conn.execute(
                 """INSERT INTO decisions (decision_id, intent_id, policy_revision,
                        registry_revision, mandate_sha256, grant_chain_digest,
@@ -204,7 +210,7 @@ class GatewayService:
                 req.operation_id,
                 decision.registry_revision,
                 mandate["mandate_sha256"],
-                "chain-digest-todo",
+                sha256_hex(canonical_json([g["grant_id"] for g in chain] + [req.grant_id])),
                 decision.outcome,
                 json.dumps(decision.reasons),
             )
@@ -234,8 +240,8 @@ class GatewayService:
         row = await conn.fetchrow(
             """INSERT INTO action_intents
                    (intent_id, episode_id, grant_id, idempotency_key, params_hash,
-                    fence_epoch, action_type)
-               VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    fence_epoch, action_type, params)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
                ON CONFLICT (idempotency_key) DO NOTHING
                RETURNING intent_id, state, fence_epoch""",
             req.operation_id,
@@ -245,6 +251,7 @@ class GatewayService:
             params_hash,
             epoch,
             req.action_type,
+            canonical_json(req.params),
         )
         if row is None:
             # replay — return the first registration, do not reserve twice
@@ -302,7 +309,7 @@ class GatewayService:
                 req.operation_id,
                 decision.registry_revision,
                 mandate["mandate_sha256"],
-                "chain-digest-todo",
+                sha256_hex(canonical_json([g["grant_id"] for g in chain] + [req.grant_id])),
                 json.dumps(["grant.budget_limit_exceeded"]),
             )
             return GatewayError(ErrorCode.BUDGET_EXHAUSTED, "grant budget window exhausted")
@@ -338,7 +345,7 @@ class GatewayService:
             req.operation_id,
             decision.registry_revision,
             mandate["mandate_sha256"],
-            "chain-digest-todo",
+            sha256_hex(canonical_json([g["grant_id"] for g in chain] + [req.grant_id])),
         )
 
         return RegisterIntentResponse(
@@ -389,6 +396,13 @@ class GatewayService:
                             "INSERT INTO obligations (obligation_id, intent_id, kind) "
                             "VALUES ($1, $2, 'reconcile')",
                             obligation_id,
+                            intent_id,
+                        )
+                        # enroll the intent in the reconciliation loop (same tx):
+                        # without this row the poller would never pick it up
+                        await conn.execute(
+                            "INSERT INTO reconcile_state (intent_id) VALUES ($1) "
+                            "ON CONFLICT (intent_id) DO NOTHING",
                             intent_id,
                         )
                         return ReceiptResponse(

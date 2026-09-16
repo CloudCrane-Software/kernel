@@ -1,0 +1,15 @@
+# Human merge gate (manual 3.2): every PR waits for a human approval via the
+# `eval-gate` environment (required reviewer = the owner). This compensates
+# for the single-account org where GitHub's required_approving_review_count=1
+# is structurally unsatisfiable (authors cannot approve their own PRs) —
+# see docs/adr/0001-required-approvals.md.
+name: merge-gate
+on:
+  pull_request:
+
+jobs:
+  human-approval:
+    runs-on: ubuntu-latest
+    environment: eval-gate
+    steps:
+      - run: echo "human approval recorded for ${{ github.event.pull_request.html_url }}"
