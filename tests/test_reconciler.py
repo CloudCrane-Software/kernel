@@ -272,3 +272,81 @@ async def test_compensation_whitelist_admission(db: Database) -> None:
     await rec.register_compensation("external.file", "compensations:rollback_file")
     assert await rec.compensation_allowed("external.file") is True
     assert await rec.compensation_allowed("unregistered.action") is False
+
+
+# ------------------------------- audit round 1: gateway UNKNOWN enrolls itself
+async def test_gateway_unknown_enrolls_reconcile_state_automatically(
+    db: Database,
+) -> None:
+    """The poller's JOIN must not silently skip gateway-created UNKNOWNs."""
+    import socket
+    import subprocess
+    import time as _time
+    from pathlib import Path
+
+    import httpx
+
+    from gateway.classifiers import default_registry
+    from gateway.schemas import ReceiptRequest, RegisterIntentRequest
+    from gateway.service import GatewayService
+    from kernel.policy import PolicyClient
+
+    policies = Path(__file__).resolve().parent.parent / "policies"
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    proc = subprocess.Popen(
+        ["opa", "run", "--server", "--addr", f"127.0.0.1:{port}", str(policies)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        base = f"http://127.0.0.1:{port}"
+        for _ in range(50):
+            try:
+                if httpx.get(f"{base}/health", timeout=1).status_code == 200:
+                    break
+            except httpx.HTTPError:
+                _time.sleep(0.2)
+        svc = GatewayService(db, PolicyClient(base), default_registry())
+        mandate_id, grant_id = _id("mnd"), _id("grt")
+        await db.register_mandate(
+            mandate_id=mandate_id,
+            human_signer="human:founder",
+            signature="sig",
+            payload={"nonce": uuid.uuid4().hex},
+            cap_amount=1_000_000,
+            ledger_id="l0",
+            expires_at="2099-01-01T00:00:00Z",
+            signature_verified=True,
+        )
+        await db.register_grant(
+            grant_id=grant_id,
+            mandate_id=mandate_id,
+            parent_grant_id=None,
+            scope={"actions": ["external.file"], "resources": ["*"], "limits": {}},
+            remaining_depth=3,
+            expiry="2099-01-01T00:00:00Z",
+        )
+        episode_id = _id("ep")
+        async with db._pool.acquire() as conn:
+            await conn.execute("INSERT INTO episodes (episode_id) VALUES ($1)", episode_id)
+        reg = await svc.register_intent(
+            RegisterIntentRequest(
+                operation_id=_id("op"),
+                episode_id=episode_id,
+                grant_id=grant_id,
+                idempotency_key=f"idem-{uuid.uuid4().hex}",
+                params={"external_path": "/tmp/does-not-matter"},
+                action_type="external.file",
+                amount=10,
+            )
+        )
+        await svc.verify_receipt(reg.intent_id, ReceiptRequest(receipt={"incomplete": True}))
+        async with db._pool.acquire() as conn:
+            enrolled = await conn.fetchval(
+                "SELECT count(*) FROM reconcile_state WHERE intent_id = $1", reg.intent_id
+            )
+        assert enrolled == 1  # the poller will see it
+    finally:
+        proc.terminate()

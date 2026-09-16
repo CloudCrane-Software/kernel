@@ -11,15 +11,18 @@ There is deliberately NO endpoint that closes an UNKNOWN intent.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
+import asyncpg
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
 from gateway.classifiers import default_registry
-from gateway.errors import GatewayError
+from gateway.errors import ErrorCode, GatewayError
 from gateway.schemas import (
     CloseEpisodeRequest,
     CloseEpisodeResponse,
@@ -36,13 +39,11 @@ from kernel.db import Database
 from kernel.policy import PolicyClient
 
 
-def build_app(db: Database, policy: PolicyClient) -> FastAPI:
-    service = GatewayService(db, policy, default_registry())
-
+def _make_app(service: GatewayService) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
-        await policy.aclose()
+        await service.policy.aclose()
 
     app = FastAPI(
         title="governance action gateway",
@@ -60,6 +61,12 @@ def build_app(db: Database, policy: PolicyClient) -> FastAPI:
             reasons=exc.reasons,
         )
         return JSONResponse(status_code=exc.http_status, content=body.model_dump())
+
+    @app.exception_handler(asyncpg.PostgresError)
+    async def pg_unavailable_handler(_: Request, exc: Exception) -> JSONResponse:
+        # any PG dependency failure maps to 503 fail-closed (manual 5.3)
+        body = ErrorBody(error=str(ErrorCode.DEPENDENCY_UNAVAILABLE), detail=f"pg: {exc}")
+        return JSONResponse(status_code=503, content=body.model_dump())
 
     @app.post("/v1/intents", response_model=RegisterIntentResponse, status_code=201)
     async def register_intent(
@@ -85,13 +92,30 @@ def build_app(db: Database, policy: PolicyClient) -> FastAPI:
     return app
 
 
-def build_app_from_env() -> FastAPI:
-    """Production entrypoint: KERNEL_PG_DSN + OPA_URL from the environment."""
-    import asyncio
+def build_app(db: Database, policy: PolicyClient, ledger: Any | None = None) -> FastAPI:
+    service = GatewayService(db, policy, default_registry(), ledger=ledger)
+    return _make_app(service)
 
+
+def build_app_from_env() -> FastAPI:
+    """Production entrypoint.
+
+    Env: KERNEL_PG_DSN, OPA_URL, and optionally KERNEL_TB_ADDRESSES
+    (plus KERNEL_TB_CLUSTER_ID, default 0). When the TigerBeetle address is
+    set, the gateway is wired with the ENGINE ledger so the mandate cap is
+    enforced at engine level (debits_must_not_exceed_credits) — the engine
+    is the only line of defense; application checks are advisory.
+    """
     dsn = os.environ.get("KERNEL_PG_DSN")
     opa_url = os.environ.get("OPA_URL", "http://opa:8181")
     if not dsn:
         raise RuntimeError("KERNEL_PG_DSN is required")
     db = asyncio.run(Database.connect(dsn))
-    return build_app(db, PolicyClient(opa_url))
+    ledger = None
+    if tb := os.environ.get("KERNEL_TB_ADDRESSES"):
+        from kernel.ledger import TigerBeetleLedger
+
+        ledger = TigerBeetleLedger(
+            cluster_id=int(os.environ.get("KERNEL_TB_CLUSTER_ID", "0")), addresses=tb
+        )
+    return build_app(db, PolicyClient(opa_url), ledger=ledger)
