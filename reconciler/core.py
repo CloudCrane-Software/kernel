@@ -57,7 +57,7 @@ class Reconciler:
         out = ReconcileOutcome()
         async with self.db._pool.acquire() as conn:
             due = await conn.fetch(
-                """SELECT i.intent_id, i.action_type, i.params_hash, i.episode_id,
+                """SELECT i.intent_id, i.action_type, i.params::text AS params_text,
                           r.probe_count, r.next_probe_at
                    FROM action_intents i
                    JOIN reconcile_state r ON r.intent_id = i.intent_id
@@ -73,7 +73,9 @@ class Reconciler:
             if adapter is None:
                 out.no_adapter += 1
                 continue
-            result = await adapter.probe(row["intent_id"], {})
+            import json as _json
+
+            result = await adapter.probe(row["intent_id"], _json.loads(row["params_text"]))
             if result == "APPLIED":
                 await self._settle(row["intent_id"], "APPLIED", adapter.name)
                 out.resolved_applied += 1

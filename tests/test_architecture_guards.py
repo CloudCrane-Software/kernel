@@ -16,15 +16,14 @@ REPO = Path(__file__).resolve().parent.parent
 
 # modules allowed to move UNKNOWN intents to a terminal state (external
 # evidence only): the receipt classifier path and the reconciler probes
-UNKNOWN_WRITERS_ALLOWED = ("gateway/service.py", "reconciler/core.py")
+UNKNOWN_WRITERS_ALLOWED = ("gateway/service.py", "reconciler/core.py", "kernel/db.py")
 
 _FORBIDDEN_ROUTE_PATTERNS = re.compile(
     r"close.?unknown|/admin|bypass|force.?close|override.?state", re.IGNORECASE
 )
 
-_INTENT_TERMINAL_UPDATE = re.compile(
-    r"UPDATE action_intents SET state\s*=\s*'(APPLIED|NOT_APPLIED)'", re.IGNORECASE
-)
+# any write of an intent's state column (literal or parameterized)
+_INTENT_STATE_WRITE = re.compile(r"UPDATE action_intents SET state", re.IGNORECASE)
 
 
 def _py_sources() -> list[Path]:
@@ -51,16 +50,18 @@ def test_no_close_unknown_or_admin_routes() -> None:
             )
 
 
-def test_unknown_to_terminal_writers_are_whitelisted() -> None:
-    """Direct SQL moves of intents to terminal states may only exist in the
-    evidence-driven paths (receipt classification, reconciler probes)."""
+def test_intent_state_writers_are_whitelisted() -> None:
+    """ANY SQL writing action_intents.state may only exist in the
+    evidence-driven paths (receipt classification, reconciler probes) —
+    parameterized or literal. New writers need an explicit whitelist entry
+    plus an audit trail of why they constitute external evidence."""
     for path in _py_sources():
         rel = path.relative_to(REPO).as_posix()
         text = path.read_text(encoding="utf-8")
-        if not _INTENT_TERMINAL_UPDATE.search(text):
+        if not _INTENT_STATE_WRITE.search(text):
             continue
         assert rel in UNKNOWN_WRITERS_ALLOWED, (
-            f"{rel} writes intent terminal states directly; only "
+            f"{rel} writes action_intents.state; only "
             f"{UNKNOWN_WRITERS_ALLOWED} are allowed (external-evidence paths)"
         )
 

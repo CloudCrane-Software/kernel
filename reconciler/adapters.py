@@ -32,7 +32,10 @@ class LogFileExistsAdapter:
     name: str = "log_file_exists"
 
     async def probe(self, intent_id: str, params: dict[str, Any]) -> str:
-        path = Path(str(params.get("external_path", "")))
+        raw = params.get("external_path")
+        if not isinstance(raw, str) or not raw:
+            return "UNKNOWN"  # missing authority pointer: never guess
+        path = Path(raw)
         parent = path.parent
         if not parent.is_dir():
             return "UNKNOWN"
