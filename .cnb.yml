@@ -1,0 +1,27 @@
+# CNB pipeline — one-way mirror GitHub -> CNB (manual §3.4).
+# Cron syntax per docs/build/crontab.md: nested under the explicit branch,
+# event key "crontab: <POSIX>" (timezone Asia/Shanghai, min interval 5min).
+# Lives in the source repo so the mirror itself carries it to CNB main.
+main:
+  "crontab: 0 * * * *":
+    - name: mirror-hourly
+      stages:
+        - name: mirror-from-github
+          script: |
+            set -eu
+            git clone --mirror https://github.com/CloudCrane-Software/kernel.git /tmp/src.git
+            cd /tmp/src.git
+            git push --force --all "https://cnb:${CNB_TOKEN}@cnb.cool/Cloudbird-Software/kernel.git"
+            git push --force --tags "https://cnb:${CNB_TOKEN}@cnb.cool/Cloudbird-Software/kernel.git"
+            echo "cron mirror done"
+  api_trigger:
+    - name: mirror-manual
+      stages:
+        - name: mirror-from-github
+          script: |
+            set -eu
+            git clone --mirror https://github.com/CloudCrane-Software/kernel.git /tmp/src.git
+            cd /tmp/src.git
+            git push --force --all "https://cnb:${CNB_TOKEN}@cnb.cool/Cloudbird-Software/kernel.git"
+            git push --force --tags "https://cnb:${CNB_TOKEN}@cnb.cool/Cloudbird-Software/kernel.git"
+            echo "manual mirror done"
