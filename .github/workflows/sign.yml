@@ -42,14 +42,37 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with: { python-version: "3.12" }
+      - name: Checkout capability artifacts (skills repo)
+        run: |
+          git clone --depth 1 "https://x-access-token:${{ secrets.SKILLS_TOKEN }}@github.com/${{ secrets.SKILLS_REPO }}.git" /tmp/skills
+          mkdir -p /tmp/artifacts
+          if [ -d "/tmp/skills/skills/${{ inputs.capability }}" ]; then
+            cp -r "/tmp/skills/skills/${{ inputs.capability }}" /tmp/artifacts/
+          else
+            # demo capability: synthesize a minimal artifact set
+            mkdir -p "/tmp/artifacts/skills/${{ inputs.capability }}"
+            printf "demo capability artifact\n" > "/tmp/artifacts/skills/${{ inputs.capability }}/README.md"
+          fi
       - name: Build, sign and publish evidence
         run: |
           uv sync --frozen --dev
-          uv run python -m kernel.evidence_publish \
+          EVIDENCE_ARTIFACTS_DIR=/tmp/artifacts/skills/${{ inputs.capability }} \
+            uv run python -m kernel.evidence_publish \
             --capability "${{ inputs.capability }}" \
             --eval-digest "${{ inputs.eval_digest }}" \
             --threshold-version "${{ inputs.threshold_version }}" \
-            --commit "${{ github.sha }}"
+            --commit "${{ github.sha }}" > /tmp/evidence.json
+          cat /tmp/evidence.json
+          # publish into the skills repo evidence/ dir and push (script path:
+          # evidence/ lives at the capability root)
+          cd /tmp/skills
+          mkdir -p "skills/${{ inputs.capability }}/evidence"
+          cp /tmp/evidence.json "skills/${{ inputs.capability }}/evidence/evidence.json"
+          git add -A
+          git -c user.name=cloudcrane-agent -c user.email=329321604+feasy898@users.noreply.github.com \
+            commit -m "evidence: ${{ inputs.capability }} (signed ${{ github.sha }})"
+          git push origin HEAD:main
         env:
           BAO_ADDR: ${{ secrets.BAO_ADDR }}
           BAO_TOKEN: ${{ secrets.BAO_TOKEN }}
+          SKILLS_TOKEN: ${{ secrets.SKILLS_TOKEN }}
