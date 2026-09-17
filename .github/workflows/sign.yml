@@ -71,9 +71,19 @@ jobs:
           cp /tmp/evidence.json "skills/${{ inputs.capability }}/evidence/evidence.json"
           git add -A
           git -c user.name=cloudcrane-agent -c user.email=329321604+feasy898@users.noreply.github.com \
-            commit -m "evidence: ${{ inputs.capability }} (signed ${{ github.sha }})"
-          git push origin HEAD:main
+            commit -m "evidence: ${{ inputs.capability }} (signed ${{ github.sha }})" || true
+          BR="evidence/${{ inputs.capability }}-${{ github.run_id }}"
+          git push origin "HEAD:$BR"
+          EXISTING="$(gh pr list --repo "$REPO" --head "$BR" --json number --jq '.[0].number')"
+          if [ -n "$EXISTING" ]; then
+            gh pr comment "$EXISTING" --repo "$REPO" --body "appended run ${{ github.run_id }}"
+          else
+            gh pr create --repo "$REPO" --head "$BR" --title "evidence: ${{ inputs.capability }} (signed)" \
+              --body "Signed evidence from sign.yml run ${{ github.run_id }}."
+          fi
         env:
           BAO_ADDR: ${{ secrets.BAO_ADDR }}
           BAO_TOKEN: ${{ secrets.BAO_TOKEN }}
           SKILLS_TOKEN: ${{ secrets.SKILLS_TOKEN }}
+          GH_TOKEN: ${{ secrets.SKILLS_TOKEN }}
+          REPO: ${{ secrets.SKILLS_REPO }}
