@@ -44,7 +44,7 @@ async def main(out_dir: Path) -> int:
         print("1) signed with eval-signer:", sig[:28], "...")
         store = FileEvidenceStore(out_dir)
         store.save(EvidenceRecord(capability=cap, statement=stmt, signature=sig))
-        print("2) evidence persisted:", store._path(cap))  # noqa: SLF001
+        print("2) evidence persisted:", store._path(cap))
         ok = await verify(store, signer, cap, artifact_name="hello.py", artifact_digest=artifact)
         print("3) verify(artifact) ->", ok)
         bad = await verify(
@@ -58,7 +58,7 @@ async def main(out_dir: Path) -> int:
         rec = store.load(cap)
         rec.statement["predicate"]["evalDigest"] = "faked-after-signing"
         tstore = FileEvidenceStore(out_dir.parent / f"{out_dir.name}-tampered")
-        tpath = tstore._path(cap)  # noqa: SLF001
+        tpath = tstore._path(cap)
         tpath.parent.mkdir(parents=True, exist_ok=True)
         tpath.write_text(json.dumps({"statement": rec.statement, "signature": sig}))
         bad2 = await verify(tstore, signer, cap, artifact_name="hello.py", artifact_digest=artifact)
