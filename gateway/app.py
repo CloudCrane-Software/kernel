@@ -68,6 +68,10 @@ def _make_app(service: GatewayService) -> FastAPI:
         body = ErrorBody(error=str(ErrorCode.DEPENDENCY_UNAVAILABLE), detail=f"pg: {exc}")
         return JSONResponse(status_code=503, content=body.model_dump())
 
+    @app.get("/health")
+    async def health() -> dict[str, str]:
+        return {"status": "ok", "service": "action-gateway"}
+
     @app.post("/v1/intents", response_model=RegisterIntentResponse, status_code=201)
     async def register_intent(
         req: RegisterIntentRequest, response: Response
