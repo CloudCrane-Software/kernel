@@ -66,8 +66,6 @@ def _register_routes(app: FastAPI, service_of: Callable[[], GatewayService]) -> 
     async def close_episode(episode_id: str, req: CloseEpisodeRequest) -> CloseEpisodeResponse:
         return await service_of().close_episode(episode_id, req)
 
-    return app
-
 
 def _register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(GatewayError)
