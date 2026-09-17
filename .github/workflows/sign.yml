@@ -56,8 +56,9 @@ jobs:
       - name: Build, sign and publish evidence
         run: |
           uv sync --frozen --dev
-          EVIDENCE_ARTIFACTS_DIR=/tmp/artifacts/skills/${{ inputs.capability }} \
-            uv run python -m kernel.evidence_publish \
+          export EVIDENCE_ARTIFACTS_DIR="/tmp/artifacts/skills/${{ inputs.capability }}"
+          ls -R /tmp/artifacts || true
+          uv run python -m kernel.evidence_publish \
             --capability "${{ inputs.capability }}" \
             --eval-digest "${{ inputs.eval_digest }}" \
             --threshold-version "${{ inputs.threshold_version }}" \
