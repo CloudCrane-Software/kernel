@@ -12,6 +12,7 @@ dependencies = [
     "httpx>=0.28.1",
     "fastapi>=0.141.1",
     "uvicorn>=0.53.0",
+    "aiokafka>=0.14.0",
 ]
 
 [dependency-groups]
@@ -49,7 +50,7 @@ warn_unreachable = true
 show_error_codes = true
 
 [[tool.mypy.overrides]]
-module = ["asyncpg.*", "testcontainers.*", "tigerbeetle.*", "restate.*"]
+module = ["asyncpg.*", "testcontainers.*", "tigerbeetle.*", "restate.*", "aiokafka.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

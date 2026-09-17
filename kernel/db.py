@@ -147,6 +147,12 @@ class Database:
     def __init__(self, pool: asyncpg.Pool) -> None:
         self._pool = pool
 
+    @property
+    def pool(self) -> asyncpg.Pool:
+        """Underlying pool, exposed for sidecar SQL outside the core DAL
+        (e.g. the audit-export batch writer); core tables stay DAL-only."""
+        return self._pool
+
     # ------------------------------------------------------------ lifecycle
     @classmethod
     async def connect(cls, dsn: str | None = None) -> Database:
