@@ -12,7 +12,7 @@ There is deliberately NO endpoint that closes an UNKNOWN intent.
 from __future__ import annotations
 
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -38,19 +38,36 @@ from kernel.db import Database
 from kernel.policy import PolicyClient
 
 
-def _make_app(service: GatewayService) -> FastAPI:
-    @asynccontextmanager
-    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        yield
-        await service.policy.aclose()
+def _register_routes(app: FastAPI, service_of: Callable[[], GatewayService]) -> None:
+    pass
 
-    app = FastAPI(
-        title="governance action gateway",
-        version="0.1.0",
-        description="The only door for external side effects.",
-        lifespan=lifespan,
-    )
+    @app.get("/health")
+    async def health() -> dict[str, str]:
+        return {"status": "ok", "service": "action-gateway"}
 
+    @app.post("/v1/intents", response_model=RegisterIntentResponse, status_code=201)
+    async def register_intent(
+        req: RegisterIntentRequest, response: Response
+    ) -> RegisterIntentResponse:
+        result = await service_of().register_intent(req)
+        if not result.created:
+            response.status_code = 200  # idempotent replay of first registration
+        return result
+
+    @app.post("/v1/intents/{intent_id}/receipt", response_model=ReceiptResponse)
+    async def verify_receipt(intent_id: str, req: ReceiptRequest) -> ReceiptResponse:
+        return await service_of().verify_receipt(intent_id, req)
+
+    @app.post("/v1/reconcile", response_model=ReconcileResponse)
+    async def reconcile(req: ReconcileRequest) -> ReconcileResponse:
+        return await service_of().reconcile(req)
+
+    @app.post("/v1/episodes/{episode_id}/close", response_model=CloseEpisodeResponse)
+    async def close_episode(episode_id: str, req: CloseEpisodeRequest) -> CloseEpisodeResponse:
+        return await service_of().close_episode(episode_id, req)
+
+
+def _register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(GatewayError)
     async def gateway_error_handler(_: Request, exc: GatewayError) -> JSONResponse:
         body = ErrorBody(
@@ -67,41 +84,31 @@ def _make_app(service: GatewayService) -> FastAPI:
         body = ErrorBody(error=str(ErrorCode.DEPENDENCY_UNAVAILABLE), detail=f"pg: {exc}")
         return JSONResponse(status_code=503, content=body.model_dump())
 
-    @app.get("/health")
-    async def health() -> dict[str, str]:
-        return {"status": "ok", "service": "action-gateway"}
 
-    @app.post("/v1/intents", response_model=RegisterIntentResponse, status_code=201)
-    async def register_intent(
-        req: RegisterIntentRequest, response: Response
-    ) -> RegisterIntentResponse:
-        result = await service.register_intent(req)
-        if not result.created:
-            response.status_code = 200  # idempotent replay of first registration
-        return result
+def _make_app(service_of: Callable[[], GatewayService]) -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        yield
+        await service_of().policy.aclose()
 
-    @app.post("/v1/intents/{intent_id}/receipt", response_model=ReceiptResponse)
-    async def verify_receipt(intent_id: str, req: ReceiptRequest) -> ReceiptResponse:
-        return await service.verify_receipt(intent_id, req)
-
-    @app.post("/v1/reconcile", response_model=ReconcileResponse)
-    async def reconcile(req: ReconcileRequest) -> ReconcileResponse:
-        return await service.reconcile(req)
-
-    @app.post("/v1/episodes/{episode_id}/close", response_model=CloseEpisodeResponse)
-    async def close_episode(episode_id: str, req: CloseEpisodeRequest) -> CloseEpisodeResponse:
-        return await service.close_episode(episode_id, req)
-
+    app = FastAPI(
+        title="governance action gateway",
+        version="0.1.0",
+        description="The only door for external side effects.",
+        lifespan=lifespan,
+    )
+    _register_error_handlers(app)
+    _register_routes(app, service_of)
     return app
 
 
 def build_app(db: Database, policy: PolicyClient, ledger: Any | None = None) -> FastAPI:
     service = GatewayService(db, policy, default_registry(), ledger=ledger)
-    return _make_app(service)
+    return _make_app(lambda: service)
 
 
-async def build_app_from_env() -> FastAPI:
-    """Production entrypoint (async factory: `uvicorn gateway.app:build_app_from_env --factory`).
+def build_app_from_env() -> FastAPI:
+    """Production entrypoint (sync factory; dependencies connect lazily in lifespan).
 
     Env: KERNEL_PG_DSN, OPA_URL, and optionally KERNEL_TB_ADDRESSES
     (plus KERNEL_TB_CLUSTER_ID, default 0). When the TigerBeetle address is
@@ -109,16 +116,33 @@ async def build_app_from_env() -> FastAPI:
     enforced at engine level (debits_must_not_exceed_credits) — the engine
     is the only line of defense; application checks are advisory.
     """
-    dsn = os.environ.get("KERNEL_PG_DSN")
-    opa_url = os.environ.get("OPA_URL", "http://opa:8181")
-    if not dsn:
-        raise RuntimeError("KERNEL_PG_DSN is required")
-    db = await Database.connect(dsn)
-    ledger = None
-    if tb := os.environ.get("KERNEL_TB_ADDRESSES"):
-        from kernel.ledger import TigerBeetleLedger
 
-        ledger = TigerBeetleLedger(
-            cluster_id=int(os.environ.get("KERNEL_TB_CLUSTER_ID", "0")), addresses=tb
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        dsn = os.environ.get("KERNEL_PG_DSN")
+        opa_url = os.environ.get("OPA_URL", "http://opa:8181")
+        if not dsn:
+            raise RuntimeError("KERNEL_PG_DSN is required")
+        db = await Database.connect(dsn)
+        ledger = None
+        if tb := os.environ.get("KERNEL_TB_ADDRESSES"):
+            from kernel.ledger import TigerBeetleLedger
+
+            ledger = TigerBeetleLedger(
+                cluster_id=int(os.environ.get("KERNEL_TB_CLUSTER_ID", "0")), addresses=tb
+            )
+        app.state.service = GatewayService(
+            db, PolicyClient(opa_url), default_registry(), ledger=ledger
         )
-    return build_app(db, PolicyClient(opa_url), ledger=ledger)
+        yield
+        await app.state.service.policy.aclose()
+
+    app = FastAPI(
+        title="governance action gateway",
+        version="0.1.0",
+        description="The only door for external side effects.",
+        lifespan=lifespan,
+    )
+    _register_error_handlers(app)
+    _register_routes(app, lambda: app.state.service)
+    return app
