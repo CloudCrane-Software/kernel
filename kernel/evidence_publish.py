@@ -47,11 +47,19 @@ async def _run(args: argparse.Namespace) -> int:
 
 
 def _capability_files(capability: str) -> list[Any]:
+    """Artifact set for the digest manifest: everything under
+    $EVIDENCE_ARTIFACTS_DIR (the capability workspace in CI), falling back to
+    skills/<capability>/. Evidence files themselves are excluded."""
+    import os
     from pathlib import Path
 
-    base = Path("skills") / capability
+    base = Path(os.environ.get("EVIDENCE_ARTIFACTS_DIR", "")) or Path("skills") / capability
     if base.is_dir():
-        return [p for p in base.rglob("*") if p.is_file() and "evidence" not in p.parts]
+        return [
+            p
+            for p in base.rglob("*")
+            if p.is_file() and "evidence" not in p.parts and ".git" not in p.parts
+        ]
     return []
 
 
