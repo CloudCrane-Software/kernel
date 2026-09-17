@@ -56,7 +56,7 @@ jobs:
       - name: Build, sign and publish evidence
         run: |
           uv sync --frozen --dev
-          export EVIDENCE_ARTIFACTS_DIR="/tmp/artifacts/skills/${{ inputs.capability }}"
+          export EVIDENCE_ARTIFACTS_DIR="/tmp/artifacts/${{ inputs.capability }}"  # cp keeps the source dir name
           ls -R /tmp/artifacts || true
           uv run python -m kernel.evidence_publish \
             --capability "${{ inputs.capability }}" \
