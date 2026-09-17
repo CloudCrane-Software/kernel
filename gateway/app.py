@@ -11,7 +11,6 @@ There is deliberately NO endpoint that closes an UNKNOWN intent.
 
 from __future__ import annotations
 
-import asyncio
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -101,8 +100,8 @@ def build_app(db: Database, policy: PolicyClient, ledger: Any | None = None) -> 
     return _make_app(service)
 
 
-def build_app_from_env() -> FastAPI:
-    """Production entrypoint.
+async def build_app_from_env() -> FastAPI:
+    """Production entrypoint (async factory: `uvicorn gateway.app:build_app_from_env --factory`).
 
     Env: KERNEL_PG_DSN, OPA_URL, and optionally KERNEL_TB_ADDRESSES
     (plus KERNEL_TB_CLUSTER_ID, default 0). When the TigerBeetle address is
@@ -114,7 +113,7 @@ def build_app_from_env() -> FastAPI:
     opa_url = os.environ.get("OPA_URL", "http://opa:8181")
     if not dsn:
         raise RuntimeError("KERNEL_PG_DSN is required")
-    db = asyncio.run(Database.connect(dsn))
+    db = await Database.connect(dsn)
     ledger = None
     if tb := os.environ.get("KERNEL_TB_ADDRESSES"):
         from kernel.ledger import TigerBeetleLedger
