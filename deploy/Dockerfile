@@ -1,0 +1,13 @@
+# gateway image — uv sync + uvicorn (kernel repo, WO-03 deployment)
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS runtime
+WORKDIR /app
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-install-project
+COPY kernel/ kernel/
+COPY gateway/ gateway/
+COPY reconciler/ reconciler/
+COPY pricing/ pricing/
+COPY ops/sql/ ops/sql/
+RUN uv sync --frozen
+EXPOSE 8000
+CMD ["uv", "run", "uvicorn", "gateway.app:build_app_from_env", "--host", "0.0.0.0", "--port", "8000"]
