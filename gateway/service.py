@@ -527,10 +527,29 @@ class GatewayService:
     ) -> CloseEpisodeResponse:
         async with self.db._pool.acquire() as conn:
             episode = await conn.fetchrow(
-                "SELECT episode_id, state FROM episodes WHERE episode_id = $1", episode_id
+                "SELECT episode_id, state, terminal_branch FROM episodes WHERE episode_id = $1",
+                episode_id,
             )
             if episode is None:
                 raise GatewayError(ErrorCode.NOT_FOUND, f"episode {episode_id} not found")
+
+            # WO-107 follow-up (K3 cold-review #3): CLOSED is terminal. Replaying
+            # the same branch is an idempotent no-op -- no UPDATE at all, so
+            # trg_episodes_one_way never bumps updated_at (J7 finding). A
+            # different branch is a conflict, never a rewrite of a terminal
+            # episode.
+            if episode["state"] == "CLOSED":
+                if episode["terminal_branch"] == req.terminal_branch:
+                    return CloseEpisodeResponse(
+                        episode_id=episode_id,
+                        state="CLOSED",
+                        terminal_branch=episode["terminal_branch"],
+                    )
+                raise IllegalEpisodeTransition(
+                    f"episode {episode_id}: already CLOSED (terminal_branch="
+                    f"{episode['terminal_branch']}); refusing rewrite to "
+                    f"{req.terminal_branch}"
+                )
 
             unknown = await conn.fetchval(
                 "SELECT count(*) FROM action_intents WHERE episode_id = $1 AND state = 'UNKNOWN'",
