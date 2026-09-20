@@ -23,7 +23,7 @@ mirrors into PG (L0 memory layer — context restore only, never evidence).
 from __future__ import annotations
 
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -32,6 +32,7 @@ from gateway.schemas import RegisterIntentRequest
 from kernel.db import Database
 from kernel.runner.base import Runner, TaskSpec
 from kernel.runner.local import LocalSubprocessRunner
+from kernel.runner.scheduler import select_runner
 
 EventCallback = Callable[[dict[str, Any]], Awaitable[None]]
 
@@ -55,11 +56,23 @@ class EpisodeExecutor:
         gateway: Any,  # gateway.service.GatewayService (typed loosely: cycle-free)
         runner: Runner | None = None,
         on_event: EventCallback | None = None,
+        runner_registry: Mapping[str, Runner] | None = None,
     ) -> None:
         self.db = db
         self.gateway = gateway
         self.runner = runner or LocalSubprocessRunner()
         self.on_event = on_event
+        # WO-104: optional sandbox-tier routing (kernel/runner/scheduler.py);
+        # None keeps the injected default runner for every task (status quo).
+        self.runner_registry = runner_registry
+
+    def _runner_for(self, metadata: dict[str, Any] | None) -> Runner:
+        """Sandbox-tier routing (WO-104): isolated tier -> runsc, else default.
+        Raises SchedulerError (fail-closed) when an isolated task has no runsc
+        runner registered — isolation is never silently downgraded."""
+        if self.runner_registry is None:
+            return self.runner
+        return select_runner(metadata, self.runner_registry, default=self.runner)
 
     async def _emit(self, event: dict[str, Any]) -> None:
         if self.on_event is not None:
@@ -115,24 +128,32 @@ class EpisodeExecutor:
         commands: list[str],
         artifacts: list[str],
         workdir: Path,
+        metadata: dict[str, Any] | None = None,
     ) -> list[str]:
         """RESERVED -> RUNNING -> VERIFYING, executing the task via the runner.
-        Returns the intents created (model_cost first)."""
+        Returns the intents created (model_cost first). `metadata` carries the
+        work-order routing attributes (WO-104: sandbox_tier)."""
         await self._charge_model_cost(episode_id, grant_id)
         await self._transition(episode_id, "RUNNING")
+        runner = self._runner_for(metadata)
         spec = TaskSpec(
             work_order_id=episode_id,
             episode_id=episode_id,
             commands=commands,
             artifacts=artifacts,
+            metadata=dict(metadata or {}),
         )
-        result = await self.runner.run(spec, workdir)
+        result = await runner.run(spec, workdir)
         await self._emit(
             {
                 "type": "episode.task_finished",
                 "episode_id": episode_id,
                 "exit_code": result.exit_code,
-                "runner": self.runner.name,
+                "runner": runner.name,
+                # WO-104: `runtime` is the scheduling decision (the G3 audit
+                # anchor — high-risk carriers must show runtime=runsc);
+                # `runner` stays for backwards-compatible consumers.
+                "runtime": runner.name,
                 "sandbox_id": result.sandbox_id,
                 "artifacts": sorted(result.artifacts),
             }
