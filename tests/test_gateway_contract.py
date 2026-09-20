@@ -21,6 +21,14 @@ from kernel.policy import PolicyClient
 
 POLICIES_DIR = Path(__file__).resolve().parent.parent / "policies"
 
+# WO-107: close joins the WO-0004 privileged surface, so the shared client
+# fixture carries a configured admin token and close calls send it.
+_ADMIN_TOKEN = "wo107-contract-admin-token"
+
+
+def _auth() -> dict[str, str]:
+    return {"Authorization": f"Bearer {_ADMIN_TOKEN}"}
+
 
 @pytest.fixture(scope="module")
 def opa_url() -> Iterator[str]:
@@ -80,7 +88,7 @@ async def db() -> AsyncIterator[Database]:
 
 @pytest_asyncio.fixture
 async def client(db: Database, opa_url: str) -> AsyncIterator[httpx.AsyncClient]:
-    app = build_app(db, PolicyClient(opa_url))
+    app = build_app(db, PolicyClient(opa_url), admin_token=_ADMIN_TOKEN)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
@@ -288,7 +296,11 @@ async def test_close_blocked_by_unknown(client: httpx.AsyncClient, db: Database)
     await client.post(f"/v1/intents/{reg['intent_id']}/receipt", json={"receipt": {"junk": 1}})
     async with db._pool.acquire() as conn:
         await conn.execute("UPDATE episodes SET state = 'RUNNING' WHERE episode_id = $1", ep)
-    resp = await client.post(f"/v1/episodes/{ep}/close", json={"terminal_branch": "not_solved"})
+    resp = await client.post(
+        f"/v1/episodes/{ep}/close",
+        headers=_auth(),
+        json={"terminal_branch": "not_solved"},
+    )
     assert resp.status_code == 409
     assert resp.json()["error"] == "UNRESOLVED_UNKNOWN_EXISTS"
 
@@ -311,7 +323,11 @@ async def test_close_blocked_by_obligations(client: httpx.AsyncClient, db: Datab
             "UPDATE reservations SET state = 'VOIDED' WHERE intent_id = $1", reg["intent_id"]
         )
         await conn.execute("UPDATE episodes SET state = 'RUNNING' WHERE episode_id = $1", ep)
-    resp = await client.post(f"/v1/episodes/{ep}/close", json={"terminal_branch": "not_solved"})
+    resp = await client.post(
+        f"/v1/episodes/{ep}/close",
+        headers=_auth(),
+        json={"terminal_branch": "not_solved"},
+    )
     assert resp.status_code == 409
     assert resp.json()["error"] == "OPEN_OBLIGATIONS_EXIST"
     assert obl_id
@@ -326,11 +342,51 @@ async def test_close_happy_path(client: httpx.AsyncClient, db: Database) -> None
     async with db._pool.acquire() as conn:
         await conn.execute("UPDATE episodes SET state = 'RUNNING' WHERE episode_id = $1", ep)
     resp = await client.post(
-        f"/v1/episodes/{ep}/close", json={"terminal_branch": "candidate_ready"}
+        f"/v1/episodes/{ep}/close",
+        headers=_auth(),
+        json={"terminal_branch": "candidate_ready"},
     )
     assert resp.status_code == 200
     assert resp.json()["state"] == "CLOSED"
     assert resp.json()["terminal_branch"] == "candidate_ready"
+
+
+# --------------------------------------------------- WO-107 close authz guards
+async def test_close_without_token_401(client: httpx.AsyncClient) -> None:
+    ep = _id("ep")
+    resp = await client.post(f"/v1/episodes/{ep}/close", json={"terminal_branch": "not_solved"})
+    assert resp.status_code == 401
+    assert resp.json()["error"] == "UNAUTHORIZED"
+
+
+async def test_close_with_wrong_token_401(client: httpx.AsyncClient) -> None:
+    ep = _id("ep")
+    resp = await client.post(
+        f"/v1/episodes/{ep}/close",
+        headers={"Authorization": "Bearer not-the-token"},
+        json={"terminal_branch": "not_solved"},
+    )
+    assert resp.status_code == 401
+    # non-bearer scheme is refused too
+    resp = await client.post(
+        f"/v1/episodes/{ep}/close",
+        headers={"Authorization": f"Basic {_ADMIN_TOKEN}"},
+        json={"terminal_branch": "not_solved"},
+    )
+    assert resp.status_code == 401
+
+
+async def test_close_unconfigured_token_fails_closed(db: Database, opa_url: str) -> None:
+    app = build_app(db, PolicyClient(opa_url), admin_token=None)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.post(
+            f"/v1/episodes/{_id('ep')}/close",
+            json={"terminal_branch": "not_solved"},
+        )
+    assert resp.status_code == 401
+    assert resp.json()["error"] == "UNAUTHORIZED"
+    assert "not configured" in resp.json()["detail"]
 
 
 # ---------------------------------------------------------- concurrency + API

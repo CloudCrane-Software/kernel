@@ -1,5 +1,6 @@
 """Episode lifecycle endpoint tests (WO-0004): POST /v1/workorders and
-POST /v1/episodes/{id}/transition.
+POST /v1/episodes/{id}/transition; plus POST /v1/episodes/{id}/close,
+which joins the privileged surface in WO-107.
 
 Pins:
 - seeding goes through the executor write path (episodes row + lease fencing);
@@ -236,6 +237,8 @@ async def test_missing_token_401(client: httpx.AsyncClient) -> None:
     assert r.json()["error"] == "UNAUTHORIZED"
     r = await client.post(f"/v1/episodes/{wo}/transition", json={"target_state": "RUNNING"})
     assert r.status_code == 401
+    r = await client.post(f"/v1/episodes/{wo}/close", json={"terminal_branch": "candidate_ready"})
+    assert r.status_code == 401
 
 
 async def test_wrong_token_401(client: httpx.AsyncClient) -> None:
@@ -253,6 +256,12 @@ async def test_wrong_token_401(client: httpx.AsyncClient) -> None:
         json={"workorder_id": wo},
     )
     assert r.status_code == 401
+    r = await client.post(
+        f"/v1/episodes/{wo}/close",
+        headers={"Authorization": "Bearer not-the-token"},
+        json={"terminal_branch": "candidate_ready"},
+    )
+    assert r.status_code == 401
 
 
 async def test_unconfigured_token_fails_closed(open_client: httpx.AsyncClient) -> None:
@@ -261,6 +270,10 @@ async def test_unconfigured_token_fails_closed(open_client: httpx.AsyncClient) -
     assert r.json()["error"] == "UNAUTHORIZED"
     detail = r.json()["detail"]
     assert "not configured" in detail
+    r = await open_client.post(
+        f"/v1/episodes/{_id('wo')}/close", json={"terminal_branch": "candidate_ready"}
+    )
+    assert r.status_code == 401
 
 
 async def test_error_body_schema_matches_gateway_contract() -> None:

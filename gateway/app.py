@@ -91,7 +91,13 @@ def _register_routes(app: FastAPI, service_of: Callable[[], GatewayService]) -> 
         return await service_of().reconcile(req)
 
     @app.post("/v1/episodes/{episode_id}/close", response_model=CloseEpisodeResponse)
-    async def close_episode(episode_id: str, req: CloseEpisodeRequest) -> CloseEpisodeResponse:
+    async def close_episode(
+        request: Request, episode_id: str, req: CloseEpisodeRequest
+    ) -> CloseEpisodeResponse | JSONResponse:
+        # WO-107 (CWE-862): close is a privileged terminal write -- same guard
+        # semantics as /v1/workorders and /transition (the WO-0004 surface).
+        if (denied := _admin_guard(request, service_of())) is not None:
+            return denied
         return await service_of().close_episode(episode_id, req)
 
     @app.post("/v1/workorders", response_model=CreateWorkorderResponse, status_code=201)
@@ -170,7 +176,7 @@ def build_app_from_env() -> FastAPI:
 
     Env: KERNEL_PG_DSN, OPA_URL, and optionally KERNEL_TB_ADDRESSES
     (plus KERNEL_TB_CLUSTER_ID, default 0) and KERNEL_ADMIN_TOKEN (WO-0004
-    bearer token for the admin/transition surface; unset = fail closed).
+    bearer token for the admin/transition/close surface; unset = fail closed).
     When the TigerBeetle address is
     set, the gateway is wired with the ENGINE ledger so the mandate cap is
     enforced at engine level (debits_must_not_exceed_credits) — the engine
