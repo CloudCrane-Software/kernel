@@ -73,7 +73,7 @@ def test_g1_closure_passes_and_detects_breakage() -> None:
 
 async def test_g2_full_fleet_hundred_percent_detection() -> None:
     fleet = fake_fleet()
-    runner = DriftInjectionRunner(fleet)
+    runner = DriftInjectionRunner(fleet, poll_seconds=1.0, poll_interval=0.1)
     results = []
     for system in ADAPTER_SYSTEMS:
         for case_id in INJECTION_CASES[system]:
@@ -109,7 +109,7 @@ class MuteAdapter:
 
 
 async def test_g2_fails_on_missed_detection() -> None:
-    runner = DriftInjectionRunner({"redis": MuteAdapter()})
+    runner = DriftInjectionRunner({"redis": MuteAdapter()}, poll_seconds=0.2, poll_interval=0.05)
     result = await runner.run_case("redis", "miss-1")
     assert not result.detected
     gate = g2_gate([result])
@@ -141,7 +141,9 @@ class HoardingRedis:
 async def test_g2_fails_on_cleanup_residue() -> None:
     from reconciler.external.adapters.redis_adapter import RedisAdapter
 
-    runner = DriftInjectionRunner({"redis": RedisAdapter(HoardingRedis())})
+    runner = DriftInjectionRunner(
+        {"redis": RedisAdapter(HoardingRedis())}, poll_seconds=0.4, poll_interval=0.1
+    )
     result = await runner.run_case("redis", "residue-1")
     assert result.detected
     assert result.cleaned and not result.clean_verified
@@ -179,9 +181,59 @@ async def test_g3_control_window_zero_false_positives() -> None:
     assert not g3_gate(noisy).passed
 
 
+class ResurrectingAdapter:
+    """Langfuse-like async indexing: the effect surfaces one tick after
+    inject(); a delete issued before indexing is silently resurrected by
+    it. The injector's settle observation must catch that and re-delete."""
+
+    name = "langfuse"
+
+    def __init__(self) -> None:
+        import time as _time
+
+        self._visible = False
+        self._injected_at = 0.0
+        self._time = _time.monotonic
+        self.deletes = 0
+        self._surfer: object = None
+
+    async def snapshot(self) -> dict[str, int]:
+        return {"trace:t1": 1} if self._visible else {}
+
+    async def inject(self, case_id: str) -> InjectedResource:
+        import asyncio
+
+        self._injected_at = self._time()
+        self._visible = False  # not indexed yet
+        resource = InjectedResource(
+            system=self.name, case_id=case_id, handle="t1", created_at=utcnow()
+        )
+
+        async def surface() -> None:
+            await asyncio.sleep(0.05)
+            self._visible = True
+
+        self._surfer = asyncio.ensure_future(surface())
+        return resource
+
+    async def cleanup(self, resource: InjectedResource) -> None:
+        self.deletes += 1
+        if self._time() - self._injected_at >= 0.15:
+            self._visible = False  # delete sticks only once indexed
+
+
+async def test_cleanup_survives_async_resurrection() -> None:
+    adapter = ResurrectingAdapter()
+    runner = DriftInjectionRunner({"langfuse": adapter}, poll_seconds=2.0, poll_interval=0.05)
+    result = await runner.run_case("langfuse", "resurrect-1")
+    assert result.detected, "polled detection must wait out async indexing"
+    assert result.cleaned and result.clean_verified
+    assert adapter.deletes >= 2, "early delete was resurrected; re-delete required"
+
+
 async def test_build_report_hard_assertions_and_serialization() -> None:
     fleet = fake_fleet()
-    runner = DriftInjectionRunner(fleet)
+    runner = DriftInjectionRunner(fleet, poll_seconds=1.0, poll_interval=0.1)
     cases = [await runner.run_case(s, INJECTION_CASES[s][0]) for s in ADAPTER_SYSTEMS]
     control = await ControlWindowRunner(fleet, cycles=2).run()
     report = build_report(

@@ -52,6 +52,11 @@ def _like_pattern(prefix: str) -> str:
     return escaped + "%"
 
 
+def _ident(name: str) -> str:
+    """Backtick-quote an identifier — case ids may carry hyphens."""
+    return "`" + name.replace("`", "``") + "`"
+
+
 class ClickHouseAdapter:
     name = "clickhouse"
 
@@ -83,14 +88,18 @@ class ClickHouseAdapter:
     async def inject(self, case_id: str) -> InjectedResource:
         table = f"{self._prefix}{case_id}"
         await self._client.query(
-            f"CREATE TABLE {self._database}.{table} (k String, v UInt32) ENGINE = Memory"
+            f"CREATE TABLE {_ident(self._database)}.{_ident(table)} "
+            "(k String, v UInt32) ENGINE = Memory"
         )
         await self._client.query(
-            f"INSERT INTO {self._database}.{table} FORMAT CSV", data="alpha,1\nbeta,2\ngamma,3\n"
+            f"INSERT INTO {_ident(self._database)}.{_ident(table)} FORMAT CSV",
+            data="alpha,1\nbeta,2\ngamma,3\n",
         )
         return InjectedResource(
             system=self.name, case_id=case_id, handle=table, created_at=utcnow()
         )
 
     async def cleanup(self, resource: InjectedResource) -> None:
-        await self._client.query(f"DROP TABLE IF EXISTS {self._database}.{resource.handle}")
+        await self._client.query(
+            f"DROP TABLE IF EXISTS {_ident(self._database)}.{_ident(resource.handle)}"
+        )
