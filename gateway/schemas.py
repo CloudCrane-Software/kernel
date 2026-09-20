@@ -58,6 +58,43 @@ class ReconcileResponse(BaseModel):
     deferred: int
 
 
+class CreateWorkorderRequest(BaseModel):
+    """WO-0004: seed a RESERVED episode for a work order (episode_id =
+    workorder_id). metadata is echoed, not persisted (episodes table has no
+    metadata column; the audit trail lives in episodes/decisions)."""
+
+    workorder_id: str = Field(min_length=1, max_length=128)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CreateWorkorderResponse(BaseModel):
+    episode_id: str
+    workorder_id: str
+    state: str
+    created: bool
+    metadata: dict[str, Any]
+
+
+class TransitionEpisodeRequest(BaseModel):
+    """WO-0004: one-way transition target. The legal edge set mirrors
+    trg_episodes_one_way (ops/sql/0001_init.sql), which stays the final
+    authority; violations surface as 409 ILLEGAL_TRANSITION."""
+
+    target_state: str = Field(pattern="^(RESERVED|RUNNING|VERIFYING|CLOSED)$")
+    terminal_branch: str | None = Field(
+        default=None,
+        pattern="^(candidate_ready|not_solved|deferred|expired)$",
+        description="required when target_state is CLOSED",
+    )
+
+
+class TransitionEpisodeResponse(BaseModel):
+    episode_id: str
+    previous_state: str
+    state: str
+    terminal_branch: str | None = None
+
+
 class CloseEpisodeRequest(BaseModel):
     terminal_branch: str = Field(pattern="^(candidate_ready|not_solved|deferred|expired)$")
 
