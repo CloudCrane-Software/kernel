@@ -191,11 +191,11 @@ class FakeClickHouse:
 
     async def query(self, sql: str, *, data: str | None = None) -> str:
         if sql.startswith("CREATE TABLE"):
-            name = sql.split()[2].split(".")[-1]
+            name = sql.split()[2].split(".")[-1].strip("`")
             self.tables[name] = []
             return ""
         if sql.startswith("INSERT INTO"):
-            name = sql.split()[2].split(".")[-1]
+            name = sql.split()[2].split(".")[-1].strip("`")
             for line in (data or "").splitlines():
                 k, _, v = line.partition(",")
                 self.tables[name].append((k, int(v)))
@@ -205,7 +205,7 @@ class FakeClickHouse:
                 f"{name}\t{len(rows)}\n" for name, rows in sorted(self.tables.items()) if rows
             )
         if sql.startswith("DROP TABLE"):
-            name = sql.split()[-1].split(".")[-1]
+            name = sql.split()[-1].split(".")[-1].strip("`")
             self.tables.pop(name, None)
             return ""
         raise AssertionError(f"fake clickhouse: unexpected query {sql!r}")

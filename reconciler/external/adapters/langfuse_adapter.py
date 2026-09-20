@@ -8,7 +8,7 @@ one trace-create item in the test namespace; cleanup DELETE
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Any, Protocol
 
 import httpx
 
@@ -45,6 +45,7 @@ class HttpxLangfuse:
         return httpx.AsyncClient(transport=self._transport, timeout=self._timeout)
 
     async def ingest_trace(self, trace_id: str, name: str) -> None:
+        now = utcnow().isoformat()
         async with await self._client() as client:
             resp = await client.post(
                 f"{self._url}/api/public/ingestion",
@@ -53,8 +54,9 @@ class HttpxLangfuse:
                         {
                             "type": "trace-create",
                             "id": trace_id,
-                            "name": name,
-                            "timestamp": utcnow().isoformat(),
+                            "timestamp": now,
+                            # v3 ingestion API: the event payload rides in `body`
+                            "body": {"id": trace_id, "name": name, "timestamp": now},
                         }
                     ]
                 },
@@ -62,6 +64,14 @@ class HttpxLangfuse:
             )
         if resp.status_code >= 300:
             raise RuntimeError(f"langfuse ingestion -> {resp.status_code}: {resp.text[:200]}")
+        # 207 multi-status: per-item verdicts decide success
+        try:
+            body: dict[str, Any] = resp.json()
+        except ValueError:
+            return
+        errors = [e for e in body.get("errors", []) if isinstance(e, dict)]
+        if errors:
+            raise RuntimeError(f"langfuse ingestion item errors: {str(errors)[:200]}")
 
     async def list_trace_ids(self, name: str) -> list[str]:
         ids: list[str] = []

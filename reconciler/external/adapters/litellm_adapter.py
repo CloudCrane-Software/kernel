@@ -39,26 +39,34 @@ class HttpxLiteLLM:
         self._transport = transport
         self._timeout = timeout
 
-    async def _post(self, path: str, payload: dict[str, object]) -> dict[str, object]:
+    async def _request(
+        self, method: str, path: str, payload: dict[str, object] | None = None
+    ) -> dict[str, object]:
         async with httpx.AsyncClient(transport=self._transport, timeout=self._timeout) as client:
-            resp = await client.post(f"{self._url}{path}", json=payload, headers=self._headers)
+            resp = await client.request(
+                method, f"{self._url}{path}", json=payload, headers=self._headers
+            )
         if resp.status_code >= 300:
             raise RuntimeError(f"litellm {path} -> {resp.status_code}: {resp.text[:200]}")
         result: dict[str, object] = resp.json()
         return result
 
     async def generate_key(self, alias: str, duration: str) -> str:
-        result = await self._post("/key/generate", {"key_alias": alias, "duration": duration})
+        result = await self._request(
+            "POST", "/key/generate", {"key_alias": alias, "duration": duration}
+        )
         token = result.get("key")
         if not isinstance(token, str) or not token:
             raise RuntimeError("litellm key/generate returned no key")
         return token
 
     async def list_keys(self) -> list[tuple[str, str]]:
-        result = await self._post("/key/list", {})
+        # the admin's own /user/info carries the virtual-key table on this
+        # LiteLLM build (v1.26: no /key/list route) — key_alias + token per key
+        result = await self._request("GET", "/user/info")
         entries = result.get("keys", [])
         if not isinstance(entries, list):
-            raise RuntimeError("litellm key/list returned unexpected shape")
+            raise RuntimeError("litellm user/info returned unexpected shape")
         pairs: list[tuple[str, str]] = []
         for entry in entries:
             if isinstance(entry, dict):
@@ -70,7 +78,7 @@ class HttpxLiteLLM:
         return pairs
 
     async def delete_key(self, token: str) -> None:
-        await self._post("/key/delete", {"keys": [token]})
+        await self._request("POST", "/key/delete", {"keys": [token]})
 
 
 class LiteLLMAdapter:

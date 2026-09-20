@@ -118,6 +118,67 @@ async def test_langfuse_trace_namespace() -> None:
     assert await adapter.snapshot() == {}
 
 
+async def test_litellm_list_reads_user_info_route() -> None:
+    """This LiteLLM build (v1.26) has no /key/list; the virtual-key table
+    comes from GET /user/info (the work order-probed admin surface)."""
+    import httpx
+
+    from reconciler.external.adapters import HttpxLiteLLM, LiteLLMAdapter
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/user/info":
+            return httpx.Response(
+                200,
+                json={
+                    "keys": [
+                        {"key_alias": "wo101-drift/x", "token": "hash-a"},
+                        {"key_alias": "production-key", "token": "hash-b"},
+                    ]
+                },
+            )
+        raise AssertionError(f"unexpected {request.method} {request.url.path}")
+
+    adapter = LiteLLMAdapter(
+        HttpxLiteLLM("http://litellm", "admin", transport=httpx.MockTransport(handler))
+    )
+    snap = await adapter.snapshot()
+    assert snap == {"virtual_key:wo101-drift/x": 1}
+
+
+async def test_clickhouse_quotes_hyphenated_identifiers() -> None:
+    """Case ids carry hyphens; unquoted identifiers are a ClickHouse syntax
+    error (found in T4 live run) — the adapter must backtick-quote."""
+    ch = fake_fleet_backends()["clickhouse"]
+    adapter = ClickHouseAdapter(ch)
+    resource = await adapter.inject("case-with-hyphens")
+    assert resource.handle == "wo101_drift_case-with-hyphens"
+    assert await adapter.snapshot() == {"rows:wo101_drift_case-with-hyphens": 3}
+    await adapter.cleanup(resource)
+    assert await adapter.snapshot() == {}
+
+
+async def test_langfuse_ingestion_207_item_errors_raise() -> None:
+    """The ingestion endpoint answers 207 multi-status even for invalid
+    items (found in T4 live run): per-item errors must raise, not pass."""
+    import httpx
+    import pytest
+
+    from reconciler.external.adapters import HttpxLangfuse, LangfuseAdapter
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert b'"id"' in request.read()  # our batch item rode the request
+        return httpx.Response(
+            207,
+            json={"successes": [], "errors": [{"id": "t1", "status": 400, "message": "bad"}]},
+        )
+
+    adapter = LangfuseAdapter(
+        HttpxLangfuse("http://lf", "pk", "sk", transport=httpx.MockTransport(handler))
+    )
+    with pytest.raises(RuntimeError, match="ingestion item errors"):
+        await adapter.inject("case-1")
+
+
 async def test_fleet_counters_are_case_scoped() -> None:
     """Every adapter's finding counters must carry the case id so G2's
     detection assertion is precise (no fuzzy system-level deltas)."""

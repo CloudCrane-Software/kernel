@@ -1,10 +1,16 @@
 """reconciler/external/injector.py — F-4 disposable drift injection runner (WO-101 G2).
 
 Per case: baseline snapshot -> inject (disposable, test-prefixed resource)
--> current snapshot -> diff -> detection assertion (a finding whose counter
-carries the resource handle) -> cleanup -> clean-verification (post-cleanup
-snapshot == baseline, the work order's 用后清理回验). G2 = detected / total
-== 100%; anything less fails the gate and the cleanup red line raises.
+-> poll for detection -> cleanup -> clean verification against the baseline.
+
+Both windows are bounded and asynchronous-lag aware (T4 live findings):
+  - detection is POLLED, not sampled once — pull-source systems may index
+    injected state asynchronously (e.g. Langfuse ingestion is queued);
+  - cleanup is VERIFIED past a settle window with re-delete on drift — a
+    delete issued before the effect was indexed can be resurrected by it.
+
+G2 = detected / total == 100% with every case cleanup-verified; anything
+less fails the gate, and a failed cleanup raises (red line).
 """
 
 from __future__ import annotations
@@ -47,8 +53,16 @@ class InjectionCaseResult:
 
 
 class DriftInjectionRunner:
-    def __init__(self, adapters: Mapping[str, ExternalSystemAdapter]) -> None:
+    def __init__(
+        self,
+        adapters: Mapping[str, ExternalSystemAdapter],
+        *,
+        poll_seconds: float = 45.0,
+        poll_interval: float = 3.0,
+    ) -> None:
         self._adapters = adapters
+        self._poll_seconds = poll_seconds
+        self._poll_interval = poll_interval
 
     async def run_case(self, system: str, case_id: str) -> InjectionCaseResult:
         adapter = self._adapters[system]
@@ -62,25 +76,57 @@ class DriftInjectionRunner:
         result.resource = resource
         result.injected_at = resource.created_at
 
-        current = SystemSnapshot(system, utcnow(), await adapter.snapshot())
-        result.findings = diff_snapshots(baseline, current)
-        result.detected = any(resource.handle in f.counter for f in result.findings)
-        if result.detected:
-            result.detected_at = current.taken_at
+        # detection window: poll until the handle shows up or the deadline
+        deadline = utcnow().timestamp() + self._poll_seconds
+        while True:
+            current = SystemSnapshot(system, utcnow(), await adapter.snapshot())
+            result.findings = diff_snapshots(baseline, current)
+            result.detected = any(resource.handle in f.counter for f in result.findings)
+            if result.detected:
+                result.detected_at = current.taken_at
+                break
+            if utcnow().timestamp() >= deadline:
+                break
+            await asyncio.sleep(self._poll_interval)
 
         try:
-            await self._cleanup_with_retry(adapter, resource)
+            result.clean_verified = await self._cleanup_until_clean(adapter, resource, baseline)
         except Exception as exc:
             result.error = f"cleanup failed: {exc}"
             return result
         result.cleaned = True
-
-        after = await adapter.snapshot()
-        result.clean_verified = dict(after) == dict(baseline.counters)
+        if not result.clean_verified:
+            result.error = (
+                "cleanup verification timed out: residual drift after "
+                f"{self._poll_seconds:.0f}s settle window"
+            )
         return result
 
     async def run_all(self, cases: Mapping[str, str]) -> list[InjectionCaseResult]:
         return [await self.run_case(system, case_id) for system, case_id in cases.items()]
+
+    async def _cleanup_until_clean(
+        self,
+        adapter: ExternalSystemAdapter,
+        resource: InjectedResource,
+        baseline: SystemSnapshot,
+    ) -> bool:
+        """Delete, then verify the snapshot equals the baseline past a settle
+        observation; re-delete if the effect surfaces late (async indexing
+        can resurrect a too-early delete)."""
+        deadline = utcnow().timestamp() + self._poll_seconds
+        while True:
+            await self._cleanup_with_retry(adapter, resource)
+            # settle observation: baseline must hold twice, one interval apart
+            first = await adapter.snapshot()
+            if dict(first) == dict(baseline.counters):
+                await asyncio.sleep(self._poll_interval)
+                second = await adapter.snapshot()
+                if dict(second) == dict(baseline.counters):
+                    return True
+            if utcnow().timestamp() >= deadline:
+                return dict(await adapter.snapshot()) == dict(baseline.counters)
+            await asyncio.sleep(self._poll_interval)
 
     @staticmethod
     async def _cleanup_with_retry(
