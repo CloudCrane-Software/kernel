@@ -1,4 +1,4 @@
-"""gateway/service.py — the four gateway operations (WO-03).
+"""gateway/service.py — the gateway operations (WO-03 + WO-0004).
 
 Cross-cutting rules (manual §5.3):
 - every request appends a decisions row (append-only ledger);
@@ -18,6 +18,8 @@ from gateway.errors import ErrorCode, GatewayError
 from gateway.schemas import (
     CloseEpisodeRequest,
     CloseEpisodeResponse,
+    CreateWorkorderRequest,
+    CreateWorkorderResponse,
     DecisionInfo,
     ReceiptRequest,
     ReceiptResponse,
@@ -25,6 +27,8 @@ from gateway.schemas import (
     ReconcileResponse,
     RegisterIntentRequest,
     RegisterIntentResponse,
+    TransitionEpisodeRequest,
+    TransitionEpisodeResponse,
 )
 from kernel.db import (
     Database,
@@ -34,11 +38,31 @@ from kernel.db import (
     new_ulid,
     sha256_hex,
 )
+from kernel.executor.episode import EpisodeExecutor
 from kernel.policy import PolicyClient, PolicyUnavailable
 
 _MAX_CHAIN = 10
 _GRANT_INACTIVE_REASONS = {"grant.not_active", "grant.expired"}
 _BUDGET_REASONS = {"grant.budget_limit_exceeded"}
+
+# WO-0004: forward edges only — exactly the legal set of trg_episodes_one_way
+# (ops/sql/0001_init.sql), which stays the final authority. Same-state
+# requests are handled as idempotent replays (no-op), matching the trigger.
+_EPISODE_FORWARD: set[tuple[str, str]] = {
+    ("RESERVED", "RUNNING"),
+    ("RUNNING", "VERIFYING"),
+    ("RUNNING", "CLOSED"),
+    ("VERIFYING", "CLOSED"),
+}
+
+
+class IllegalEpisodeTransition(Exception):
+    """WO-0004: requested episode transition is outside the one-way map.
+
+    Maps to HTTP 409 at the routing layer. Deliberately NOT a member of
+    gateway.errors.ErrorCode: that enum is pinned closed by the smoke eval
+    (tests/test_smoke_eval.py) and guard.yml forbids mixing eval assets with
+    product code in one PR."""
 
 
 def _now_rfc3339() -> str:
@@ -52,10 +76,19 @@ class GatewayService:
         policy: PolicyClient,
         classifiers: ClassifierRegistry | None = None,
         ledger: Any | None = None,
+        admin_token: str | None = None,
     ) -> None:
         self.db = db
         self.policy = policy
         self.classifiers = classifiers or ClassifierRegistry()
+        # WO-0004 privileged surface: bearer token for the admin/transition
+        # endpoints. None = fail closed (every admin request is 401).
+        # Compared constant-time at the routing layer.
+        self.admin_token = admin_token
+        # WO-0004: episode seeding goes through the executor's write path —
+        # INSERT + lease fencing, identical to in-process execution; there is
+        # deliberately no second way to create episodes.
+        self._executor = EpisodeExecutor(db=db, gateway=self)
         # optional budget ledger (WO-05): when present, reservations carry a
         # real engine transfer id instead of the ULID placeholder
         self.ledger = ledger
@@ -545,4 +578,91 @@ class GatewayService:
                 ) from e
         return CloseEpisodeResponse(
             episode_id=episode_id, state="CLOSED", terminal_branch=req.terminal_branch
+        )
+
+    # -------------------------------------------------- POST /v1/workorders
+    async def create_workorder(self, req: CreateWorkorderRequest) -> CreateWorkorderResponse:
+        """Seed a RESERVED episode for a work order (WO-0004).
+
+        The write path is EpisodeExecutor.start_episode — the same
+        INSERT + lease fencing the executor uses in-process. Idempotent:
+        an existing id returns its CURRENT state with created=False
+        (201 only on first creation, mirroring POST /v1/intents)."""
+        async with self.db._pool.acquire() as conn:
+            existing = await conn.fetchval(
+                "SELECT state FROM episodes WHERE episode_id = $1", req.workorder_id
+            )
+        if existing is not None:
+            return CreateWorkorderResponse(
+                episode_id=req.workorder_id,
+                workorder_id=req.workorder_id,
+                state=existing,
+                created=False,
+                metadata=req.metadata,
+            )
+        await self._executor.start_episode(req.workorder_id)
+        return CreateWorkorderResponse(
+            episode_id=req.workorder_id,
+            workorder_id=req.workorder_id,
+            state="RESERVED",
+            created=True,
+            metadata=req.metadata,
+        )
+
+    # ------------------------------------------- POST /v1/episodes/{id}/transition
+    async def transition_episode(
+        self, episode_id: str, req: TransitionEpisodeRequest
+    ) -> TransitionEpisodeResponse:
+        """One-way episode state transition (WO-0004).
+
+        The pre-check mirrors trg_episodes_one_way so the contract is a 409
+        instead of a raw PG exception; the trigger remains the final
+        authority (the write goes through kernel.db.episode_transition).
+        CLOSED requires (and pins) its terminal_branch."""
+        async with self.db._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT state, terminal_branch FROM episodes WHERE episode_id = $1", episode_id
+            )
+        if row is None:
+            raise GatewayError(ErrorCode.NOT_FOUND, f"episode {episode_id} not found")
+        current, current_branch = row["state"], row["terminal_branch"]
+
+        if req.target_state == "CLOSED" and req.terminal_branch is None:
+            raise GatewayError(
+                ErrorCode.VALIDATION_ERROR,
+                "terminal_branch is required when target_state is CLOSED",
+            )
+        if req.target_state != "CLOSED" and req.terminal_branch is not None:
+            raise GatewayError(
+                ErrorCode.VALIDATION_ERROR,
+                "terminal_branch is only allowed when target_state is CLOSED",
+            )
+
+        if req.target_state == current:
+            # idempotent replay (trigger allows same-state); a CLOSED episode
+            # may only replay with its own branch — rewriting history is 409
+            if current == "CLOSED" and req.terminal_branch != current_branch:
+                raise IllegalEpisodeTransition(
+                    f"episode {episode_id} already CLOSED with terminal_branch={current_branch!r}"
+                )
+            return TransitionEpisodeResponse(
+                episode_id=episode_id,
+                previous_state=current,
+                state=current,
+                terminal_branch=current_branch,
+            )
+
+        if (current, req.target_state) not in _EPISODE_FORWARD:
+            raise IllegalEpisodeTransition(
+                f"episode {episode_id}: illegal one-way transition {current} -> {req.target_state}"
+            )
+        try:
+            await self.db.episode_transition(episode_id, req.target_state, req.terminal_branch)
+        except InvariantViolation as e:
+            raise IllegalEpisodeTransition(str(e)) from e
+        return TransitionEpisodeResponse(
+            episode_id=episode_id,
+            previous_state=current,
+            state=req.target_state,
+            terminal_branch=req.terminal_branch,
         )
