@@ -351,6 +351,80 @@ async def test_close_happy_path(client: httpx.AsyncClient, db: Database) -> None
     assert resp.json()["terminal_branch"] == "candidate_ready"
 
 
+# ------------------------------------- WO-107 terminal-state short-circuit
+async def test_close_replay_of_closed_episode_is_idempotent_noop(
+    client: httpx.AsyncClient, db: Database
+) -> None:
+    _, grant_id, ep = await _seed(db)
+    reg = (await client.post("/v1/intents", json=_intent_req(grant_id, ep))).json()
+    await client.post(
+        f"/v1/intents/{reg['intent_id']}/receipt", json={"receipt": {"status": "applied"}}
+    )
+    async with db._pool.acquire() as conn:
+        await conn.execute("UPDATE episodes SET state = 'RUNNING' WHERE episode_id = $1", ep)
+    first = await client.post(
+        f"/v1/episodes/{ep}/close",
+        headers=_auth(),
+        json={"terminal_branch": "candidate_ready"},
+    )
+    assert first.status_code == 200
+
+    async with db._pool.acquire() as conn:
+        before = await conn.fetchrow(
+            "SELECT state, terminal_branch, updated_at FROM episodes WHERE episode_id = $1", ep
+        )
+    replay = await client.post(
+        f"/v1/episodes/{ep}/close",
+        headers=_auth(),
+        json={"terminal_branch": "candidate_ready"},
+    )
+    assert replay.status_code == 200
+    assert replay.json()["state"] == "CLOSED"
+    assert replay.json()["terminal_branch"] == "candidate_ready"
+    async with db._pool.acquire() as conn:
+        after = await conn.fetchrow(
+            "SELECT state, terminal_branch, updated_at FROM episodes WHERE episode_id = $1", ep
+        )
+    assert after["updated_at"] == before["updated_at"]  # short-circuit: no write at all
+    assert after["terminal_branch"] == "candidate_ready"
+
+
+async def test_close_of_closed_episode_with_other_branch_is_409(
+    client: httpx.AsyncClient, db: Database
+) -> None:
+    _, grant_id, ep = await _seed(db)
+    reg = (await client.post("/v1/intents", json=_intent_req(grant_id, ep))).json()
+    await client.post(
+        f"/v1/intents/{reg['intent_id']}/receipt", json={"receipt": {"status": "applied"}}
+    )
+    async with db._pool.acquire() as conn:
+        await conn.execute("UPDATE episodes SET state = 'RUNNING' WHERE episode_id = $1", ep)
+    first = await client.post(
+        f"/v1/episodes/{ep}/close",
+        headers=_auth(),
+        json={"terminal_branch": "candidate_ready"},
+    )
+    assert first.status_code == 200
+    async with db._pool.acquire() as conn:
+        before = await conn.fetchrow(
+            "SELECT state, terminal_branch, updated_at FROM episodes WHERE episode_id = $1", ep
+        )
+    conflict = await client.post(
+        f"/v1/episodes/{ep}/close",
+        headers=_auth(),
+        json={"terminal_branch": "not_solved"},
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["error"] == "ILLEGAL_TRANSITION"
+    async with db._pool.acquire() as conn:
+        after = await conn.fetchrow(
+            "SELECT state, terminal_branch, updated_at FROM episodes WHERE episode_id = $1", ep
+        )
+    assert after["state"] == "CLOSED"
+    assert after["terminal_branch"] == "candidate_ready"  # stored branch immutable
+    assert after["updated_at"] == before["updated_at"]
+
+
 # --------------------------------------------------- WO-107 close authz guards
 async def test_close_without_token_401(client: httpx.AsyncClient) -> None:
     ep = _id("ep")
