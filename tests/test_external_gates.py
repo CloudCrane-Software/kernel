@@ -181,54 +181,80 @@ async def test_g3_control_window_zero_false_positives() -> None:
     assert not g3_gate(noisy).passed
 
 
-class ResurrectingAdapter:
-    """Langfuse-like async indexing: the effect surfaces one tick after
-    inject(); a delete issued before indexing is silently resurrected by
-    it. The injector's settle observation must catch that and re-delete."""
+class AsyncDeletionAdapter:
+    """Langfuse-like async pipelines, modeled on the live findings: the
+    injected effect surfaces `index_latency` after inject; a delete applies
+    `delete_latency` after the DELETE call (the 200 only enqueues it);
+    with resurrect=True the effect reappears once after deletion applied —
+    the settle observation must catch it and re-delete."""
 
     name = "langfuse"
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        index_latency: float = 0.05,
+        delete_latency: float = 0.25,
+        resurrect: bool = False,
+        resurrect_latency: float = 0.05,
+    ) -> None:
         import time as _time
 
-        self._visible = False
-        self._injected_at = 0.0
         self._time = _time.monotonic
+        self._index_latency = index_latency
+        self._delete_latency = delete_latency
+        self._resurrect = resurrect
+        self._resurrect_latency = resurrect_latency
+        self._t0 = 0.0
+        self._delete_at: float | None = None
+        self._resurrect_used = False
         self.deletes = 0
-        self._surfer: object = None
 
     async def snapshot(self) -> dict[str, int]:
-        return {"trace:t1": 1} if self._visible else {}
+        now = self._time()
+        indexed = bool(self._t0) and now >= self._t0 + self._index_latency
+        deletion_applied = (
+            self._delete_at is not None and now >= self._delete_at + self._delete_latency
+        )
+        resurrect_due = (
+            self._delete_at is not None
+            and now >= self._delete_at + self._delete_latency + self._resurrect_latency
+            and self._resurrect
+            and not self._resurrect_used
+        )
+        if resurrect_due:
+            self._resurrect_used = True
+        visible = indexed and (not deletion_applied or resurrect_due)
+        return {"trace:t1": 1} if visible else {}
 
     async def inject(self, case_id: str) -> InjectedResource:
-        import asyncio
-
-        self._injected_at = self._time()
-        self._visible = False  # not indexed yet
-        resource = InjectedResource(
-            system=self.name, case_id=case_id, handle="t1", created_at=utcnow()
-        )
-
-        async def surface() -> None:
-            await asyncio.sleep(0.05)
-            self._visible = True
-
-        self._surfer = asyncio.ensure_future(surface())
-        return resource
+        self._t0 = self._time()
+        return InjectedResource(system=self.name, case_id=case_id, handle="t1", created_at=utcnow())
 
     async def cleanup(self, resource: InjectedResource) -> None:
         self.deletes += 1
-        if self._time() - self._injected_at >= 0.15:
-            self._visible = False  # delete sticks only once indexed
+        self._delete_at = self._time()
 
 
-async def test_cleanup_survives_async_resurrection() -> None:
-    adapter = ResurrectingAdapter()
-    runner = DriftInjectionRunner({"langfuse": adapter}, poll_seconds=2.0, poll_interval=0.05)
-    result = await runner.run_case("langfuse", "resurrect-1")
+async def test_cleanup_waits_out_queued_deletion() -> None:
+    adapter = AsyncDeletionAdapter()
+    runner = DriftInjectionRunner({"langfuse": adapter}, poll_seconds=3.0, poll_interval=0.05)
+    result = await runner.run_case("langfuse", "lag-1")
     assert result.detected, "polled detection must wait out async indexing"
     assert result.cleaned and result.clean_verified
-    assert adapter.deletes >= 2, "early delete was resurrected; re-delete required"
+    assert adapter.deletes == 1, "queued deletion must not be re-delete-spammed"
+
+
+async def test_cleanup_redeletes_on_true_resurrection() -> None:
+    # delete_latency=0.25 + resurrect_latency=0.2 vs interval=0.15: the
+    # settle observation samples the baseline at ~0.45s and the resurrected
+    # effect at ~0.60s — the re-delete branch must fire.
+    adapter = AsyncDeletionAdapter(resurrect=True, resurrect_latency=0.2)
+    runner = DriftInjectionRunner({"langfuse": adapter}, poll_seconds=5.0, poll_interval=0.15)
+    result = await runner.run_case("langfuse", "resurrect-1")
+    assert result.detected
+    assert result.cleaned and result.clean_verified
+    assert adapter.deletes >= 2, "resurrection after baseline must be re-deleted"
 
 
 async def test_build_report_hard_assertions_and_serialization() -> None:
