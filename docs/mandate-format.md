@@ -28,18 +28,18 @@ mandates/0001-bootstrap.signed.json # JCS payload + signature (machine-checked)
 ## Signing procedure (human)
 
 ```bash
-# on srv-1, with the mandate file's payload_jcs already canonicalized:
+# on the governance server (OpenBao company-bao), with the mandate
+# file's payload_jcs already canonicalized:
 base64 -w0 mandates/0001-bootstrap.jcs > /tmp/in.b64
 BAO_TOKEN=<root-or-signed-token> bao write transit/sign/human-signer \
     input="$(cat /tmp/in.b64)"   # output: vault:v1:<sig>
 # paste the signature value into the .signed.json and the .md
 ```
 
-## Registration (admin, internal only)
+## Registration (bootstrap-time admin action, internal only)
 
-```bash
-curl -X POST https://api.<DOMAIN>/v1/admin/mandates -d @mandates/0001-bootstrap.signed.json
-```
+Mandates enter the ledger once at bootstrap, via the operator's admin path;
+the deployed gateway exposes no public mandate-registration route.
 
 The kernel verifies: digest match (mandate_sha256 == sha256(payload_jcs)),
 signature via `bao transit verify/human-signer`, expiry window — and only
