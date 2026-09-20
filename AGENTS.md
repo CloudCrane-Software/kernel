@@ -1,24 +1,71 @@
 # AGENTS.md — kernel
 
 One sentence: the governance kernel monorepo — six-table ledger, OPA policies,
-action gateway and reconciler that make every external action authorized,
-budgeted, lease-fenced and evidenced.
+action gateway, episode executor and reconciler that make every external
+action authorized, budgeted, lease-fenced, reconciled and evidenced.
 
 ## Directory map
 
 ```
-kernel/        data access layer (asyncpg) + decision ledger domain
-gateway/       action gateway — FastAPI, the only door to external effects
-reconciler/    three-state reconciler for UNKNOWN intents
-kernel/executor/  episode state machine (RESERVED->RUNNING->VERIFYING->CLOSED) + Restate adapter
-kernel/runner/    bounded task runners (local subprocess / JiuwenBox sandbox / gVisor runsc isolation tier — WO-104 scheduler: kernel/runner/scheduler.py)
-pricing/       cost engine placeholder (M3)
-policies/      OPA Rego policies + tests (opa test policies/)
-ops/sql/       explicit DDL migrations (applied in order, idempotent)
-tests/         pytest suite (unit + testcontainers integration)
-docs/adr/      architecture decision records
+kernel/                  data access layer (asyncpg) + decision ledger domain
+kernel/executor/         episode state machine (RESERVED->RUNNING->VERIFYING->CLOSED) + Restate adapter (restate_app.py)
+kernel/runner/           bounded task runners: local subprocess (dev/tests default), JiuwenBox sandbox (production), gVisor runsc isolation tier (WO-104) + sandbox_tier routing (scheduler.py)
+kernel/audit_export/     Restate -> Kafka audit-events -> PG audit pipeline (WO-0001)
+gateway/                 action gateway — FastAPI, the only door to external effects; hosts the episode lifecycle API (WO-0004, see below)
+reconciler/              three-state reconciler for UNKNOWN intents
+reconciler/external/     six-system external adapters (WO-101: redis/clickhouse/minio/zot/litellm/langfuse) — snapshot + drift reconciliation with disposable-resource injection
+pricing/                 cost engine placeholder (M3) in this repo; the operational subscription ledger + daily reports live in the separate pricing repo (WO-102)
+policies/                OPA Rego policies + tests (opa test policies/)
+ops/sql/                 explicit DDL migrations (applied in order, idempotent)
+ops/scripts/             evidence demo (evidence_demo.py)
+deploy/                  image definitions (gateway, audit-export sidecar)
+tests/                   pytest suite (unit + testcontainers integration)
+docs/adr/                architecture decision records
 docs/mandate-format.md   mandate file format (WO-03)
 ```
+
+## Episode lifecycle & work-order flow (WO-0004)
+
+Every work order runs as an episode through the deployed gateway (bearer
+admin token from the platform env — never in code, logs or transcripts):
+
+1. open the work order: a file under `workorders/` in the mandates repo,
+   merged via CNB MR (no direct pushes anywhere in this system);
+2. register the episode: `POST /v1/workorders` — idempotent, seeds RESERVED;
+3. drive the one-way state machine via
+   `POST /v1/episodes/{episode_id}/transition` (RESERVED -> RUNNING ->
+   VERIFYING; illegal moves surface as 409 ILLEGAL_TRANSITION and the
+   `trg_episodes_one_way` trigger in `ops/sql/0001_init.sql` stays the final
+   authority);
+4. develop on a branch: PR -> machine gates (test / opa / guard / eval-smoke)
+   -> `sign.yml` evidence signing -> evidence PR (skills repo) -> squash
+   merge. Merges are machine-gated auto merges with no human review step
+   (ADR-0003): the system's own PRs and human PRs pass the identical gates —
+   same gate, no privilege;
+5. close: `POST /v1/episodes/{episode_id}/close` with
+   `{"terminal_branch": "candidate_ready"}` (alternatives: not_solved,
+   deferred, expired). CLOSED without a terminal branch is impossible
+   (CHECK constraint).
+
+## M2 delivery status (WO-101..105, as of 2026-09-20)
+
+- WO-101: reconciler external adapters for the six closed-list systems —
+  merged (PR#25-#27), live-verified with disposable drift injection; the
+  sandbox task ran on the runsc tier (audit event runtime=runsc).
+- WO-102: pricing skeleton + daily report pipeline — operational home is the
+  separate pricing repo (subscriptions.yaml, reports/daily branch, cron).
+- WO-103: LiteLLM weekly budget windows — platform repo
+  ops/litellm/config.yaml (proxy max_budget + 7d, wo103-plans anchor).
+- WO-104: gVisor runsc Provider + sandbox_tier routing — merged (PR#24);
+  host runtime registered (release-20260914.0); an isolated-tier task with
+  runsc missing fails closed (SchedulerError), never a silent downgrade.
+- WO-105: kernel self-rewrite — this documentation, its doc-sync tests, and
+  the fully machine-gated self-change closed loop (the loop is the
+  deliverable).
+
+Deployment topology: images gateway 0.1.5 and audit-export 0.2.0 on the edge
+stack (platform repo compose; OpenBao single-key-box — after any host restart
+run the platform ops/scripts/edge-recovery.sh first).
 
 ## Build & test commands
 
@@ -61,5 +108,12 @@ uv run pre-commit run --all-files
 - Work orders arrive as files; do not expand scope; stop and report on
   anything unclear or blocked.
 - Every non-trivial change ships with tests that would fail without it.
+- Docs stay equal to reality: a change that makes AGENTS.md/README/docs
+  stale updates them in the same PR (sync gates in
+  `tests/test_docs_sync.py`, WO-105).
+- Unknowns are never closed administratively (manual 7.4). Any urge to have
+  a human write code, pass messages or approve on the system's behalf is
+  itself a defect: file a defect work order, never work around it (manual
+  7.2).
 - Idempotency, fencing and budget occupation are protocol invariants — when
   in doubt, fail closed (DENY/DEPENDENCY_UNAVAILABLE), never guess.
