@@ -78,16 +78,26 @@ class DriftInjectionRunner:
 
         # detection window: poll until the handle shows up or the deadline
         deadline = utcnow().timestamp() + self._poll_seconds
-        while True:
-            current = SystemSnapshot(system, utcnow(), await adapter.snapshot())
-            result.findings = diff_snapshots(baseline, current)
-            result.detected = any(resource.handle in f.counter for f in result.findings)
-            if result.detected:
-                result.detected_at = current.taken_at
-                break
-            if utcnow().timestamp() >= deadline:
-                break
-            await asyncio.sleep(self._poll_interval)
+        try:
+            while True:
+                current = SystemSnapshot(system, utcnow(), await adapter.snapshot())
+                result.findings = diff_snapshots(baseline, current)
+                result.detected = any(resource.handle in f.counter for f in result.findings)
+                if result.detected:
+                    result.detected_at = current.taken_at
+                    break
+                if utcnow().timestamp() >= deadline:
+                    break
+                await asyncio.sleep(self._poll_interval)
+        except Exception as exc:
+            # red line first: never leave the injected resource behind
+            result.error = f"detection probe failed: {exc}"
+            try:
+                result.clean_verified = await self._cleanup_until_clean(adapter, resource, baseline)
+                result.cleaned = True
+            except Exception as clean_exc:
+                result.error += f"; cleanup failed: {clean_exc}"
+            return result
 
         try:
             result.clean_verified = await self._cleanup_until_clean(adapter, resource, baseline)
@@ -111,19 +121,22 @@ class DriftInjectionRunner:
         resource: InjectedResource,
         baseline: SystemSnapshot,
     ) -> bool:
-        """Delete, then verify the snapshot equals the baseline past a settle
-        observation; re-delete if the effect surfaces late (async indexing
-        can resurrect a too-early delete)."""
+        """Delete once, then verify the snapshot equals the baseline past a
+        settle observation. Deletion itself may be queued (Langfuse: the
+        delete lands tens of seconds after the 200), so do NOT re-delete
+        while the effect is merely still visible — that resets the queue.
+        Re-delete only after the baseline held and the effect came back
+        (true resurrection)."""
         deadline = utcnow().timestamp() + self._poll_seconds
+        await self._cleanup_with_retry(adapter, resource)
         while True:
-            await self._cleanup_with_retry(adapter, resource)
-            # settle observation: baseline must hold twice, one interval apart
-            first = await adapter.snapshot()
-            if dict(first) == dict(baseline.counters):
+            first = dict(await adapter.snapshot())
+            if first == dict(baseline.counters):
                 await asyncio.sleep(self._poll_interval)
-                second = await adapter.snapshot()
-                if dict(second) == dict(baseline.counters):
+                second = dict(await adapter.snapshot())
+                if second == dict(baseline.counters):
                     return True
+                await self._cleanup_with_retry(adapter, resource)
             if utcnow().timestamp() >= deadline:
                 return dict(await adapter.snapshot()) == dict(baseline.counters)
             await asyncio.sleep(self._poll_interval)

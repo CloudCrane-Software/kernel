@@ -121,13 +121,19 @@ class AuditConsumer:
         consumer is considered caught up after ``idle_rounds`` consecutive
         empty polls.
         """
-        applied_total = 0
-        idle = 0
-        while idle < idle_rounds:
-            applied = await self.poll_once()
-            applied_total += applied
-            idle = 0 if applied else idle + 1
-        return applied_total
+        # the one-shot path runs standalone (no run() loop): own the source
+        # lifecycle, otherwise getmany hits an unstarted consumer
+        await self._source.start()
+        try:
+            applied_total = 0
+            idle = 0
+            while idle < idle_rounds:
+                applied = await self.poll_once()
+                applied_total += applied
+                idle = 0 if applied else idle + 1
+            return applied_total
+        finally:
+            await self._source.stop()
 
     async def run(self) -> None:
         """Consume forever until cancelled (SIGTERM/SIGINT at the entrypoint)."""

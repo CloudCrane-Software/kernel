@@ -8,6 +8,7 @@ one trace-create item in the test namespace; cleanup DELETE
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
 import httpx
@@ -35,19 +36,42 @@ class HttpxLangfuse:
         *,
         transport: httpx.AsyncBaseTransport | None = None,
         timeout: float = 10.0,
+        attempts: int = 3,
     ) -> None:
         self._url = url.rstrip("/")
         self._auth = (public_key, secret_key)
         self._transport = transport
         self._timeout = timeout
+        self._attempts = attempts
 
     async def _client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(transport=self._transport, timeout=self._timeout)
 
+    async def _send(self, request: Callable[[], Awaitable[httpx.Response]]) -> httpx.Response:
+        """The public API hiccups under ingestion load (observed live: a
+        transient 422/503 mid-settle) — retry idempotent sends briefly."""
+        import asyncio
+
+        last_error: Exception | None = None
+        for attempt in range(self._attempts):
+            try:
+                resp = await request()
+            except httpx.HTTPError as exc:
+                last_error = exc
+            else:
+                if resp.status_code < 500 and resp.status_code != 422:
+                    return resp
+                last_error = RuntimeError(f"transient status {resp.status_code}")
+            if attempt < self._attempts - 1:
+                await asyncio.sleep(1.0 * (attempt + 1))
+        raise RuntimeError(f"langfuse request failed after {self._attempts} attempts: {last_error}")
+
     async def ingest_trace(self, trace_id: str, name: str) -> None:
         now = utcnow().isoformat()
-        async with await self._client() as client:
-            resp = await client.post(
+
+        async def send() -> httpx.Response:
+            client = await self._client()
+            return await client.post(
                 f"{self._url}/api/public/ingestion",
                 json={
                     "batch": [
@@ -62,6 +86,8 @@ class HttpxLangfuse:
                 },
                 auth=self._auth,
             )
+
+        resp = await self._send(send)
         if resp.status_code >= 300:
             raise RuntimeError(f"langfuse ingestion -> {resp.status_code}: {resp.text[:200]}")
         # 207 multi-status: per-item verdicts decide success
@@ -77,12 +103,16 @@ class HttpxLangfuse:
         ids: list[str] = []
         page = 1
         while True:
-            async with await self._client() as client:
-                resp = await client.get(
+
+            async def send(page: int = page) -> httpx.Response:
+                client = await self._client()
+                return await client.get(
                     f"{self._url}/api/public/traces",
                     params={"name": name, "page": page, "limit": _PAGE_SIZE},
                     auth=self._auth,
                 )
+
+            resp = await self._send(send)
             if resp.status_code >= 300:
                 raise RuntimeError(f"langfuse traces -> {resp.status_code}")
             body = resp.json()
@@ -95,8 +125,11 @@ class HttpxLangfuse:
             page += 1
 
     async def delete_trace(self, trace_id: str) -> None:
-        async with await self._client() as client:
-            resp = await client.delete(f"{self._url}/api/public/traces/{trace_id}", auth=self._auth)
+        async def send() -> httpx.Response:
+            client = await self._client()
+            return await client.delete(f"{self._url}/api/public/traces/{trace_id}", auth=self._auth)
+
+        resp = await self._send(send)
         if resp.status_code >= 300:
             raise RuntimeError(f"langfuse trace delete -> {resp.status_code}")
 

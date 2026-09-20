@@ -82,7 +82,7 @@ async def _cmd_eval(
         systems = system_list or list(ADAPTER_SYSTEMS)
 
     case_results = []
-    runner = DriftInjectionRunner(adapters)
+    runner = DriftInjectionRunner(adapters, poll_seconds=90.0)
     for system in ADAPTER_SYSTEMS:
         for case_id in INJECTION_CASES[system]:
             case_results.append(await runner.run_case(system, case_id))
@@ -126,7 +126,7 @@ async def _cmd_episode(*, report_path: Path | None, cycles: int, workdir: Path) 
     systems = list(ADAPTER_SYSTEMS)
 
     case_results = []
-    runner = DriftInjectionRunner(adapters)
+    runner = DriftInjectionRunner(adapters, poll_seconds=90.0)
     for system in ADAPTER_SYSTEMS:
         for case_id in INJECTION_CASES[system]:
             case_results.append(await runner.run_case(system, case_id))
@@ -134,7 +134,6 @@ async def _cmd_episode(*, report_path: Path | None, cycles: int, workdir: Path) 
 
     # -- WO-104 carrier: isolated-tier episode -> runsc runner --------------
     from gateway.classifiers import default_registry as default_classifier_registry
-    from gateway.schemas import CloseEpisodeRequest
     from gateway.service import GatewayService
     from kernel.db import Database
     from kernel.executor.episode import EpisodeExecutor
@@ -163,9 +162,12 @@ async def _cmd_episode(*, report_path: Path | None, cycles: int, workdir: Path) 
         await executor.run_task(
             episode_id=episode_id,
             grant_id=grant_id,
+            # in-task retry: sandbox cold starts can fail transiently
             commands=[
+                "s=1; for i in 1 2 3; do "
                 "python -m reconciler.external.harness --mode sandbox-selfcheck "
-                "--report artifacts/selfcheck-report.json"
+                "--report artifacts/selfcheck-report.json && s=0 && break || s=$?; "
+                "sleep 2; done; exit $s"
             ],
             artifacts=["artifacts/selfcheck-report.json"],
             workdir=task_dir,
@@ -175,12 +177,14 @@ async def _cmd_episode(*, report_path: Path | None, cycles: int, workdir: Path) 
         runtime = str(finished.get("runtime", ""))
         if runtime != "runsc":
             raise RuntimeError(f"WO-104 anchor broken: task_finished runtime={runtime!r}")
-        await gateway.close_episode(
-            episode_id, CloseEpisodeRequest(terminal_branch="candidate_ready")
-        )
+        # verify-then-close through the executor: settles the model-cost
+        # accounting and moves VERIFYING -> CLOSED.candidate_ready
+        await executor.resolve_verification(episode_id, "candidate_ready")
         row = await _episode_state(db, episode_id)
-        if int(finished.get("exit_code") or 1) != 0:
-            raise RuntimeError("sandbox self-check failed inside the runsc task")
+        if int(finished.get("exit_code", 1)) != 0:
+            raise RuntimeError(
+                "sandbox self-check failed inside the runsc task (3 in-task attempts)"
+            )
         selfcheck_path = task_dir / "artifacts" / "selfcheck-report.json"
         selfcheck: dict[str, Any] | None = None
         if selfcheck_path.is_file():
@@ -194,7 +198,11 @@ async def _cmd_episode(*, report_path: Path | None, cycles: int, workdir: Path) 
             "exit_code": finished.get("exit_code"),
             "final_state": row[0],
             "terminal_branch": row[1],
-            "selfcheck_all_passed": (selfcheck or {}).get("all_passed"),
+            "selfcheck_all_passed": (
+                all(g.get("passed") for g in (selfcheck or {}).get("gates", []))
+                if selfcheck
+                else None
+            ),
             "closed_at": datetime.now(UTC).isoformat(),
         }
     finally:
