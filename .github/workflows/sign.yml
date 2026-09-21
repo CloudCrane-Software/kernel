@@ -46,13 +46,15 @@ jobs:
         run: |
           git clone --depth 1 "https://x-access-token:${{ secrets.SKILLS_TOKEN }}@github.com/${{ secrets.SKILLS_REPO }}.git" /tmp/skills
           mkdir -p /tmp/artifacts
-          if [ -d "/tmp/skills/skills/${{ inputs.capability }}" ]; then
-            cp -r "/tmp/skills/skills/${{ inputs.capability }}" /tmp/artifacts/
-          else
-            # demo capability: synthesize a minimal artifact set
-            mkdir -p "/tmp/artifacts/skills/${{ inputs.capability }}"
-            printf "demo capability artifact\n" > "/tmp/artifacts/skills/${{ inputs.capability }}/README.md"
+          # WO-108 F9: designed block, not a coincidence-based one -- a
+          # capability that does not exist on the skills repo main is a hard
+          # error. The old "demo capability" synthesis branch (with its
+          # misplaced stub path) is deliberately gone.
+          if [ ! -d "/tmp/skills/skills/${{ inputs.capability }}" ]; then
+            echo "::error::capability '${{ inputs.capability }}' not found in ${{ secrets.SKILLS_REPO }} (skills/<capability> must exist on main)"
+            exit 1
           fi
+          cp -r "/tmp/skills/skills/${{ inputs.capability }}" /tmp/artifacts/
       - name: Build, sign and publish evidence
         run: |
           uv sync --frozen --dev
@@ -70,8 +72,11 @@ jobs:
           mkdir -p "skills/${{ inputs.capability }}/evidence"
           cp /tmp/evidence.json "skills/${{ inputs.capability }}/evidence/evidence.json"
           git add -A
+          # WO-108 F12: no `|| true` here -- a failed commit must fail the
+          # step (fail loud); the skills-evidence branch is fresh per run, so
+          # "nothing to commit" is itself an anomaly worth stopping for.
           git -c user.name=cloudcrane-agent -c user.email=329321604+feasy898@users.noreply.github.com \
-            commit -m "evidence: ${{ inputs.capability }} (signed ${{ github.sha }})" || true
+            commit -m "evidence: ${{ inputs.capability }} (signed ${{ github.sha }})"
           BR="evidence/${{ inputs.capability }}-${{ github.run_id }}"
           git push origin "HEAD:$BR"
           EXISTING="$(gh pr list --repo "$REPO" --head "$BR" --json number --jq '.[0].number')"

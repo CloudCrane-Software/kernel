@@ -4,7 +4,9 @@ Flow: eval green -> build a digest manifest -> wrap it in an in-toto Statement
 (predicate: evaluator=eval-signer, threshold version, pass time) -> sign the
 statement bytes with the OpenBao Transit ed25519 key `eval-signer` (the key
 never leaves OpenBao) -> persist statement+signature as the capability's
-evidence. Reuse of a capability requires verify() to pass on the artifact
+evidence (WO-108 F11: the persisted signature section is an object carrying
+keyid + algorithm, so third parties can verify against the published public
+key). Reuse of a capability requires verify() to pass on the artifact
 digest — memory or claims are never authority.
 
 The private key never exists as a file; evidence is never signed by the
@@ -28,6 +30,10 @@ PREDICATE_TYPE = "https://cloudcrane.software/eval/v1"
 
 class EvidenceError(Exception):
     pass
+
+
+def _is_key_version(segment: str) -> bool:
+    return segment.startswith("v") and segment[1:].isdigit()
 
 
 def build_statement(
@@ -94,6 +100,17 @@ class OpenBaoTransitSigner:
         except (KeyError, TypeError) as e:
             raise EvidenceError(f"unusable sign response: {e}") from e
 
+    def key_id(self, signature: str) -> str:
+        """WO-108 F11: signer identity for the evidence envelope — the transit
+        key name plus the key version embedded in the signature payload
+        (OpenBao transit signatures carry it as ``vault:vN:<digest>``), e.g.
+        ``eval-signer/v1``. Falls back to the bare key name when the payload
+        shape is unrecognized. Third parties use this (with the published
+        public key) to tell WHICH key version signed an evidence record."""
+        parts = signature.split(":", 2)
+        version = parts[1] if len(parts) == 3 and _is_key_version(parts[1]) else ""
+        return f"{self._key_name}/{version}" if version else self._key_name
+
     async def verify(self, payload: bytes, signature: str) -> bool:
         body = {
             "input": base64.b64encode(payload).decode("ascii"),
@@ -113,6 +130,26 @@ class EvidenceRecord:
     capability: str
     statement: dict[str, Any]
     signature: str
+    # WO-108 F11: signer identity (OpenBao transit key name/version, e.g.
+    # "eval-signer/v1") and signature algorithm — persisted with the record
+    # so third parties can verify without asking us which key signed.
+    keyid: str = ""
+    algorithm: str = "ed25519"
+
+
+def signature_section(record: EvidenceRecord) -> dict[str, Any] | str:
+    """The persisted envelope's signature section (WO-108 F11).
+
+    Records that know their signer carry an object::
+
+        {"value": "<vault:vN:...>", "keyid": "eval-signer/v1", "algorithm": "ed25519"}
+
+    legacy records (bare "vault:vN:..." string) keep their historical shape —
+    load() accepts both, already-published evidence never breaks.
+    """
+    if record.keyid:
+        return {"value": record.signature, "keyid": record.keyid, "algorithm": record.algorithm}
+    return record.signature
 
 
 class FileEvidenceStore:
@@ -132,7 +169,7 @@ class FileEvidenceStore:
             raise EvidenceError(f"evidence for {record.capability} already exists (immutable)")
         payload = {
             "statement": record.statement,
-            "signature": record.signature,
+            "signature": signature_section(record),
         }
         path.write_text(json.dumps(payload, sort_keys=True, indent=2), encoding="utf-8")
         return path
@@ -142,10 +179,19 @@ class FileEvidenceStore:
         if not path.exists():
             raise EvidenceError(f"no evidence for {capability}")
         data = json.loads(path.read_text(encoding="utf-8"))
-        return EvidenceRecord(
+        sig = data["signature"]
+        if isinstance(sig, dict):  # WO-108 F11 object envelope
+            return EvidenceRecord(
+                capability=capability,
+                statement=data["statement"],
+                signature=str(sig.get("value", "")),
+                keyid=str(sig.get("keyid", "")),
+                algorithm=str(sig.get("algorithm", "ed25519")),
+            )
+        return EvidenceRecord(  # legacy bare-string envelope
             capability=capability,
             statement=data["statement"],
-            signature=data["signature"],
+            signature=str(sig),
         )
 
 
