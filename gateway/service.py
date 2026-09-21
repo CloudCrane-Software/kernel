@@ -10,6 +10,7 @@ Cross-cutting rules (manual §5.3):
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
@@ -40,6 +41,8 @@ from kernel.db import (
 )
 from kernel.executor.episode import EpisodeExecutor
 from kernel.policy import PolicyClient, PolicyUnavailable
+from kernel.runner.base import Runner
+from kernel.runner.scheduler import production_registry
 
 _MAX_CHAIN = 10
 _GRANT_INACTIVE_REASONS = {"grant.not_active", "grant.expired"}
@@ -77,6 +80,7 @@ class GatewayService:
         classifiers: ClassifierRegistry | None = None,
         ledger: Any | None = None,
         admin_token: str | None = None,
+        runner_registry: Mapping[str, Runner] | None = None,
     ) -> None:
         self.db = db
         self.policy = policy
@@ -88,7 +92,18 @@ class GatewayService:
         # WO-0004: episode seeding goes through the executor's write path —
         # INSERT + lease fencing, identical to in-process execution; there is
         # deliberately no second way to create episodes.
-        self._executor = EpisodeExecutor(db=db, gateway=self)
+        # WO-108 F1: production assembly carries the sandbox-tier registry by
+        # default (kernel/runner/scheduler.py production_registry): runsc is
+        # registered when the environment provides it; without runsc the
+        # registry is EMPTY and isolated-tier tasks fail closed in
+        # select_runner — never a silent downgrade. EpisodeExecutor treats a
+        # None registry as "no routing at all", so None is normalised here;
+        # pass an explicit mapping to override (tests inject stubs).
+        self._executor = EpisodeExecutor(
+            db=db,
+            gateway=self,
+            runner_registry=(production_registry() if runner_registry is None else runner_registry),
+        )
         # optional budget ledger (WO-05): when present, reservations carry a
         # real engine transfer id instead of the ULID placeholder
         self.ledger = ledger

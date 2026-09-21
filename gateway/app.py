@@ -177,6 +177,11 @@ def build_app_from_env() -> FastAPI:
     Env: KERNEL_PG_DSN, OPA_URL, and optionally KERNEL_TB_ADDRESSES
     (plus KERNEL_TB_CLUSTER_ID, default 0) and KERNEL_ADMIN_TOKEN (WO-0004
     bearer token for the admin/transition/close surface; unset = fail closed).
+    KERNEL_RUNSC_ENABLED (WO-108 F1): "1"/"true" asserts the HOST provides the
+    gVisor runsc runtime (registers it for isolated-tier routing), "0"/"false"
+    forces the empty registry (isolated-tier tasks fail closed with
+    SchedulerError); default detects the runsc binary on PATH — see
+    kernel/runner/scheduler.py production_registry.
     When the TigerBeetle address is
     set, the gateway is wired with the ENGINE ledger so the mandate cap is
     enforced at engine level (debits_must_not_exceed_credits) — the engine
