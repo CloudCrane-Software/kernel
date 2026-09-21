@@ -11,9 +11,26 @@ on:
       threshold_version:
         description: "eval-gate threshold file version used"
         required: true
+      commit:
+        description: "merge SHA of the merged delivery PR this evidence signs (merge SHA, not head)"
+        required: true
 
-# Evidence signing (manual §6.3). Runs AFTER an eval pass, on demand.
-# Requires repo secrets (set once srv-1 + skills token exist):
+# Evidence signing (manual §6.3) — PROCESS ORDER (WO-108 F7).
+#
+# The signature binds a MERGED DELIVERABLE, not a moving baseline. Correct
+# order:
+#   1. the delivery PR (branch -> main, four gates green) is SQUASH-MERGED;
+#   2. sign.yml is dispatched AFTER that merge, with `commit` = the MERGE SHA
+#      of the delivery PR (the squash commit on main). "merge SHA, not head":
+#      the run's own head SHA (github.sha) is whatever main happens to be at
+#      dispatch time and binds nothing in particular;
+#   3. the signed evidence PR opens against the skills repo, and the eval
+#      pass it cites references the same merge SHA.
+# Dispatching before the merge, or signing github.sha, produces evidence that
+# does not bind any merged deliverable — treat that as a process bug.
+#
+# Runs on demand, after an eval pass. Requires repo secrets (set once srv-1
+# + skills token exist):
 #   BAO_ADDR       e.g. https://bao.example.com
 #   BAO_TOKEN      token with transit sign permission on eval-signer
 #   SKILLS_REPO    e.g. CloudCrane-Software/skills
@@ -64,7 +81,7 @@ jobs:
             --capability "${{ inputs.capability }}" \
             --eval-digest "${{ inputs.eval_digest }}" \
             --threshold-version "${{ inputs.threshold_version }}" \
-            --commit "${{ github.sha }}" > /tmp/evidence.json
+            --commit "${{ inputs.commit }}" > /tmp/evidence.json
           cat /tmp/evidence.json
           # publish into the skills repo evidence/ dir and push (script path:
           # evidence/ lives at the capability root)
@@ -76,7 +93,7 @@ jobs:
           # step (fail loud); the skills-evidence branch is fresh per run, so
           # "nothing to commit" is itself an anomaly worth stopping for.
           git -c user.name=cloudcrane-agent -c user.email=329321604+feasy898@users.noreply.github.com \
-            commit -m "evidence: ${{ inputs.capability }} (signed ${{ github.sha }})"
+            commit -m "evidence: ${{ inputs.capability }} (signed ${{ inputs.commit }})"
           BR="evidence/${{ inputs.capability }}-${{ github.run_id }}"
           git push origin "HEAD:$BR"
           EXISTING="$(gh pr list --repo "$REPO" --head "$BR" --json number --jq '.[0].number')"
