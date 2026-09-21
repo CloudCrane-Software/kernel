@@ -6,7 +6,8 @@ on:
 
 # Structural rule (manual §6.1 guard.yml): product code and eval assets must
 # never be modified in the same change. The threshold path manifest lives in
-# the CNB eval-gate repo (manifest.yaml - authoritative per WO-0003/ADR-0005);
+# the CNB eval-gate repo (manifest.yaml - authoritative per WO-0003/ADR-0005,
+# mirrored read-only at docs/adr/0005-evalgate-ci-platform.md);
 # the in-repo eval assets below are additionally guarded.
 
 jobs:
