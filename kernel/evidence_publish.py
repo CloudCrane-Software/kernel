@@ -16,7 +16,13 @@ import json
 import sys
 from typing import Any
 
-from kernel.evidence import EvidenceRecord, OpenBaoTransitSigner, build_statement, statement_bytes
+from kernel.evidence import (
+    EvidenceRecord,
+    OpenBaoTransitSigner,
+    build_statement,
+    signature_section,
+    statement_bytes,
+)
 
 
 async def _run(args: argparse.Namespace) -> int:
@@ -41,8 +47,19 @@ async def _run(args: argparse.Namespace) -> int:
         signature = await signer.sign(statement_bytes(statement))
     finally:
         await signer.aclose()
-    record = EvidenceRecord(capability=args.capability, statement=statement, signature=signature)
-    print(json.dumps({"statement": record.statement, "signature": record.signature}, indent=2))
+    # WO-108 F11: the published envelope's signature section is an object
+    # carrying keyid (transit key name/version) + algorithm, not a bare string.
+    record = EvidenceRecord(
+        capability=args.capability,
+        statement=statement,
+        signature=signature,
+        keyid=signer.key_id(signature),
+    )
+    print(
+        json.dumps(
+            {"statement": record.statement, "signature": signature_section(record)}, indent=2
+        )
+    )
     return 0
 
 
