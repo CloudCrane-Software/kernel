@@ -7,7 +7,7 @@ on:
 jobs:
   eval-smoke:
     runs-on: ubuntu-latest
-    # machine gate: eval smoke must pass on every PR (ADR-0003 - no human review step)
+    # machine gate: eval smoke must pass on every PR (ADR-0003 — docs/adr/0003-auto-merge-principle.md — no human review step)
     environment: eval-gate
     steps:
       - uses: actions/checkout@v4

@@ -18,9 +18,9 @@ pricing/                 cost engine placeholder (M3) in this repo; the operatio
 policies/                OPA Rego policies + tests (opa test policies/)
 ops/sql/                 explicit DDL migrations (applied in order, idempotent)
 ops/scripts/             evidence demo (evidence_demo.py)
-deploy/                  image definitions (gateway, audit-export sidecar)
+deploy/                  image definitions (gateway, audit-export sidecar, kernel-task runner image for runsc episodes, images.env version pins)
 tests/                   pytest suite (unit + testcontainers integration)
-docs/adr/                architecture decision records
+docs/adr/                architecture decision records (0000 process; 0003/0005 are read-only mirrors — see the headers there)
 docs/mandate-format.md   mandate file format (WO-03)
 ```
 
@@ -40,8 +40,9 @@ admin token from the platform env — never in code, logs or transcripts):
 4. develop on a branch: PR -> machine gates (test / opa / guard / eval-smoke)
    -> `sign.yml` evidence signing -> evidence PR (skills repo) -> squash
    merge. Merges are machine-gated auto merges with no human review step
-   (ADR-0003): the system's own PRs and human PRs pass the identical gates —
-   same gate, no privilege;
+   (ADR-0003: `docs/adr/0003-auto-merge-principle.md`, read-only mirror of
+   the .github repo): the system's own PRs and human PRs pass the identical
+   gates — same gate, no privilege;
 5. close: `POST /v1/episodes/{episode_id}/close` with
    `{"terminal_branch": "candidate_ready"}` (alternatives: not_solved,
    deferred, expired). CLOSED without a terminal branch is impossible
@@ -54,8 +55,10 @@ admin token from the platform env — never in code, logs or transcripts):
   sandbox task ran on the runsc tier (audit event runtime=runsc).
 - WO-102: pricing skeleton + daily report pipeline — operational home is the
   separate pricing repo (subscriptions.yaml, reports/daily branch, cron).
-- WO-103: LiteLLM weekly budget windows — platform repo
-  ops/litellm/config.yaml (proxy max_budget + 7d, wo103-plans anchor).
+- WO-103: LiteLLM weekly budget windows + LiteLLM→Langfuse success-callback
+  wiring (every completion traced to Langfuse for usage governance) — platform
+  repo ops/litellm/config.yaml (proxy max_budget + 7d, wo103-plans anchor,
+  `success_callback: ["langfuse"]`).
 - WO-104: gVisor runsc Provider + sandbox_tier routing — merged (PR#24);
   host runtime registered (release-20260914.0); an isolated-tier task with
   runsc missing fails closed (SchedulerError), never a silent downgrade.
@@ -63,8 +66,13 @@ admin token from the platform env — never in code, logs or transcripts):
   the fully machine-gated self-change closed loop (the loop is the
   deliverable).
 
-Deployment topology: images gateway 0.1.5 and audit-export 0.2.0 on the edge
-stack (platform repo compose; OpenBao single-key-box — after any host restart
+Known open items: WO-106 episode evidence binding (defect, open — see the
+mandates repo workorders/0106-episode-evidence-binding.md).
+
+Deployment topology: images gateway 0.1.6, audit-export 0.2.0 and the
+kernel-task runsc task image on the edge stack (platform repo compose; the
+version pins are mirrored in `deploy/images.env` and bound to this line by
+`tests/test_docs_sync.py`; OpenBao single-key-box — after any host restart
 run the platform ops/scripts/edge-recovery.sh first).
 
 ## Build & test commands
