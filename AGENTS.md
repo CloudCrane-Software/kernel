@@ -12,6 +12,7 @@ kernel/executor/         episode state machine (RESERVED->RUNNING->VERIFYING->CL
 kernel/runner/           bounded task runners: local subprocess (dev/tests default), JiuwenBox sandbox (production), gVisor runsc isolation tier (WO-104) + sandbox_tier routing (scheduler.py)
 kernel/audit_export/     Restate -> Kafka audit-events -> PG audit pipeline (WO-0001)
 gateway/                 action gateway — FastAPI, the only door to external effects; hosts the episode lifecycle API (WO-0004, see below)
+kernel/watcher/          work-order watcher (batch D): polls the mandates repo, seeds episodes via the gateway and writes dev-dispatch files (MVP: poll+dispatch)
 reconciler/              three-state reconciler for UNKNOWN intents
 reconciler/external/     six-system external adapters (WO-101: redis/clickhouse/minio/zot/litellm/langfuse) — snapshot + drift reconciliation with disposable-resource injection
 pricing/                 cost engine placeholder (M3) in this repo; the operational subscription ledger + daily reports live in the separate pricing repo (WO-102)
@@ -48,6 +49,36 @@ admin token from the platform env — never in code, logs or transcripts):
    deferred, expired). CLOSED without a terminal branch is impossible
    (CHECK constraint).
 
+## Work-order watcher (batch D MVP)
+
+`kernel/watcher/` closes the last manual gap: a resident loop (no web
+server) that makes work-order files self-executing up to the development
+hand-off:
+
+1. poll — fetch the mandates ref (mounted clone, `git fetch` + tree reads
+   against FETCH_HEAD; the clone working copy is never touched) and diff
+   `workorders/*.md` against the state ledger (`WATCHER_STATE_PATH`,
+   atomically persisted);
+2. dispatch — for each new OPEN work order: seed the episode
+   (`POST /v1/workorders`, idempotent), drive RESERVED -> RUNNING
+   (`POST /v1/episodes/{id}/transition`) and write one atomic dispatch
+   file `<workorder_id>.json` into the dispatch volume (full work-order
+   text, episode id, eval-suite texts resolved from the eval-gate clone,
+   and the expected consumer flow for the development agent);
+3. workorder id convention: `workorders/NNNN-<slug>.md` ->
+   `wo-NNNN-<slug>` (matches the seeded episodes on record).
+
+Safety properties: first cycle is a baseline sweep (records existing
+history, dispatches nothing — `WATCHER_BASELINE_ON_FIRST_RUN`); only
+status-OPEN files dispatch; every step replays safely after a crash;
+failures back off exponentially and escalate to `failed` with a CRITICAL
+alert after `WATCHER_MAX_ATTEMPTS`; alerting funnels through
+alert-notify.sh (`WATCHER_ALERT_CMD`). The watcher carries no secrets in
+dispatch files and never touches PG directly — the gateway API is the
+only write path. The verifier (run suite criteria on VERIFYING) and the
+closer (evidence section + mandates close-out MR) are future iterations
+building on the same ledger.
+
 ## M2 delivery status (WO-101..105, as of 2026-09-20)
 
 - WO-101: reconciler external adapters for the six closed-list systems —
@@ -69,7 +100,8 @@ admin token from the platform env — never in code, logs or transcripts):
 Known open items: WO-106 episode evidence binding (defect, open — see the
 mandates repo workorders/0106-episode-evidence-binding.md).
 
-Deployment topology: images gateway 0.1.6, audit-export 0.2.0 and the
+Deployment topology: images gateway 0.1.6, audit-export 0.2.0, watcher
+0.1.0 (compose-defined, deployment pending owner approval) and the
 kernel-task runsc task image on the edge stack (platform repo compose; the
 version pins are mirrored in `deploy/images.env` and bound to this line by
 `tests/test_docs_sync.py`; OpenBao single-key-box — after any host restart

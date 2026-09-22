@@ -38,6 +38,8 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+# CJK work-order text legitimately carries fullwidth punctuation
+allowed-confusables = ["（", "）", "："]
 ignore = ["E501"]
 
 [tool.ruff.lint.isort]
